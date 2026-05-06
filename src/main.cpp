@@ -80,10 +80,9 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
       String data = String((char *)value.c_str());
       Serial.printf("📡 BLE RX (%d bytes): %s\n", value.length(), data.c_str());
 
-      // Parse GPS: format "GPS:lat,lon,speed"
       if (data.startsWith("GPS:"))
       {
-        String gpsStr = data.substring(4); // Remove "GPS:"
+        String gpsStr = data.substring(4); 
         int comma1 = gpsStr.indexOf(',');
         int comma2 = gpsStr.lastIndexOf(',');
 
@@ -101,36 +100,47 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
           Serial.printf("✓ GPS Updated: Lat=%.6f Lon=%.6f Speed=%.1f\n", lat, lon, speed);
         }
       }
-      // Parse ROUTE: format "ROUTE:lat1,lon1;lat2,lon2;..."
       else if (data.startsWith("ROUTE:"))
       {
         Serial.println("✓ Route data received");
-      }
-      else
-      {
-        Serial.printf("⚠ Unknown format: %s\n", data.c_str());
       }
     }
   }
 };
 
-// Old TFT_eSPI drawing functions removed - using LVGL UI instead
-// drawDestinationArrow, drawMapView, drawRandomRoads, drawRoutePath, drawEgocentricMapView
-
 void updateCompass()
 {
-  // Simulate compass heading (0.5°/100ms = 180°/minute)
   static uint32_t lastUpdate = 0;
   if (millis() - lastUpdate > 100)
   {
     lastUpdate = millis();
-    compassData.heading += 0.5;
-    if (compassData.heading >= 360)
-      compassData.heading = 0;
+    
+    Wire.beginTransmission(0x0D);  
+    Wire.write(0x00);              
+    if (Wire.endTransmission(false) == 0)
+    {
+      if (Wire.requestFrom(0x0D, 6) == 6)
+      {
+        int16_t x = (int16_t)(Wire.read() | (Wire.read() << 8));
+        int16_t y = (int16_t)(Wire.read() | (Wire.read() << 8));
+        int16_t z = (int16_t)(Wire.read() | (Wire.read() << 8));
+        
+        // Hanya update jika data tidak nol semua (mencegah glitch UI)
+        if (x != 0 || y != 0) {
+          float h = atan2((float)y, (float)x) * 180.0 / M_PI;
+          if (h < 0) h += 360.0;
+          compassData.heading = h;
+          Serial.printf("QMC5883L: X=%d Y=%d Z=%d heading=%.1f°\n", x, y, z, compassData.heading);
+        } else {
+          // Jika masih nol, pancing lagi Continuous Mode-nya
+          Wire.beginTransmission(0x0D);
+          Wire.write(0x09);
+          Wire.write(0x1D);
+          Wire.endTransmission();
+        }
+      }
+    }
   }
-  
-  // TODO: Enable QMC5883L when library docs available
-  // For now, using simulated heading for UI testing
 }
 
 void setup()
@@ -142,84 +152,90 @@ void setup()
   Serial.begin(115200);
   delay(500);
 
-  // Suppress BT stack debug logs
   esp_log_level_set("BT_SMP", ESP_LOG_ERROR);
   esp_log_level_set("BT_BTM", ESP_LOG_ERROR);
 
   Serial.println("\n=== GPS TRACKER SETUP ===");
-  Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
 
   tft.init();
   tft.setRotation(0);
   tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
   tft.drawCentreString("GPS TRACKER", 120, 50, 4);
-  tft.drawCentreString("INITIALIZING", 120, 100, 2);
 
   Wire.begin(2, 1);
   Wire.setClock(50000);
 
-  Serial.println("⚠ QMC5883L disabled (pending library documentation)");
-  Serial.println("  Using simulated heading for UI testing");
-  tft.drawCentreString("QMC: SIM", 120, 130, 1);
+  // Initialize QMC5883L dengan prosedur Reset
+  Wire.beginTransmission(0x0D);
+  Wire.write(0x0B); 
+  if (Wire.endTransmission(false) == 0 && Wire.requestFrom(0x0D, 1) == 1)
+  {
+    byte chipID = Wire.read();
+    if (chipID == 0xFF) 
+    {
+      Serial.printf("✓ QMC5883L detected (ChipID: 0x%02X)\n", chipID);
+      
+      // 1. SOFT RESET
+      Wire.beginTransmission(0x0D);
+      Wire.write(0x0A); 
+      Wire.write(0x80); // Set Soft Reset
+      Wire.endTransmission();
+      delay(100);
 
-  // Init BLE with simpler config
+      // 2. SET/RESET PERIOD (Penting untuk memulai pengukuran)
+      Wire.beginTransmission(0x0D);
+      Wire.write(0x0B);
+      Wire.write(0x01); 
+      Wire.endTransmission();
+
+      // 3. KONFIGURASI OPERASI (Continuous Mode)
+      Wire.beginTransmission(0x0D);
+      Wire.write(0x09); 
+      Wire.write(0x1D); // 200Hz, 8G range, 512 oversampling, Continuous mode
+      Wire.endTransmission();
+
+      tft.drawCentreString("QMC OK", 120, 130, 2);
+    }
+    else
+    {
+      tft.drawCentreString("QMC UNKNOWN", 120, 130, 1);
+    }
+  }
+  else
+  {
+    Serial.println("⚠ QMC5883L not responding");
+    tft.drawCentreString("QMC ERR", 120, 130, 1);
+  }
+
+  // BLE Setup (Tetap sesuai aslinya)
   BLEDevice::init("GPS_Tracker_BLE");
-  BLEDevice::setMTU(517); // Increase MTU for larger packets
-
+  BLEDevice::setMTU(517); 
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
-
   BLEService *pService = pServer->createService(SERVICE_UUID);
-
-  // TX Characteristic (Notify)
-  pTxCharacteristic = pService->createCharacteristic(
-      CHARACTERISTIC_TX,
-      BLECharacteristic::PROPERTY_NOTIFY);
+  pTxCharacteristic = pService->createCharacteristic(CHARACTERISTIC_TX, BLECharacteristic::PROPERTY_NOTIFY);
   pTxCharacteristic->addDescriptor(new BLE2902());
-
-  // RX Characteristic (Write - NO response needed)
-  BLECharacteristic *pRxCharacteristic = pService->createCharacteristic(
-      CHARACTERISTIC_RX,
-      BLECharacteristic::PROPERTY_WRITE_NR);
+  BLECharacteristic *pRxCharacteristic = pService->createCharacteristic(CHARACTERISTIC_RX, BLECharacteristic::PROPERTY_WRITE_NR);
   pRxCharacteristic->setCallbacks(new MyCharacteristicCallbacks());
-
   pService->start();
-
-  // Configure advertising
-  BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
-  pAdvertising->addServiceUUID(SERVICE_UUID);
-  pAdvertising->setScanResponse(true);
-  pAdvertising->setMinPreferred(0x00);
-  pAdvertising->setMaxPreferred(0x00);
-  pAdvertising->setMinInterval(0x20); // 32 * 0.625ms = 20ms
-  pAdvertising->setMaxInterval(0x40); // 64 * 0.625ms = 40ms
-
   BLEDevice::startAdvertising();
-
-  Serial.println("✓ BLE started as 'GPS_Tracker_BLE'");
 
   // Initialize LVGL
   lv_init();
   lv_port_disp_init();
   ui_init();
 
-  delay(2000);
-  Serial.println("Setup complete! LVGL watch UI ready...\n");
+  Serial.println("✓ Setup complete!");
 }
 
 void loop()
 {
-  // Update LVGL
   lv_timer_handler();
-
-  // Update LVGL tick
   lv_port_tick_inc();
 
-  // Update compass heading
   updateCompass();
 
-  // Update UI with latest GPS data every 1 second (1000ms)
   static uint32_t lastUpdate = 0;
   if (millis() - lastUpdate >= 1000)
   {
@@ -228,5 +244,5 @@ void loop()
                   gpsData.speed, compassData.heading, deviceConnected);
   }
 
-  delay(5); // LVGL tick interval
+  delay(5); 
 }
