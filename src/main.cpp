@@ -13,7 +13,7 @@
 // Forward declarations for LVGL port
 extern void lv_port_disp_init(void);
 extern void lv_port_tick_inc(void);
-extern "C" void ui_update_gps(double lat, double lon, float speed, float heading, bool connected);
+extern "C" void ui_update_gps(double lat, double lon, float speed, float heading, int16_t x, int16_t y, int16_t z, bool connected);
 
 TFT_eSPI tft = TFT_eSPI();
 Adafruit_NeoPixel pixels(1, 48, NEO_GRB + NEO_KHZ800);
@@ -31,6 +31,9 @@ struct GPSData
 struct CompassData
 {
   float heading = 0.0;
+  int16_t x = 0;
+  int16_t y = 0;
+  int16_t z = 0;
 };
 
 GPSData gpsData;
@@ -124,6 +127,11 @@ void updateCompass()
         int16_t x = (int16_t)(Wire.read() | (Wire.read() << 8));
         int16_t y = (int16_t)(Wire.read() | (Wire.read() << 8));
         int16_t z = (int16_t)(Wire.read() | (Wire.read() << 8));
+        
+        // Simpan ke struct
+        compassData.x = x;
+        compassData.y = y;
+        compassData.z = z;
         
         // Hanya update jika data tidak nol semua (mencegah glitch UI)
         if (x != 0 || y != 0) {
@@ -241,7 +249,8 @@ void loop()
   {
     lastUpdate = millis();
     ui_update_gps(gpsData.currentLat, gpsData.currentLon,
-                  gpsData.speed, compassData.heading, deviceConnected);
+                  gpsData.speed, compassData.heading, 
+                  compassData.x, compassData.y, compassData.z, deviceConnected);
   }
 
   delay(5);
