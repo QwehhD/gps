@@ -237,12 +237,12 @@ void loop()
   updateCompass();
 
   static uint32_t lastUpdate = 0;
-  if (millis() - lastUpdate >= 1000)
+  if (millis() - lastUpdate >= 500)
   {
     lastUpdate = millis();
     ui_update_gps(gpsData.currentLat, gpsData.currentLon,
                   gpsData.speed, compassData.heading, deviceConnected);
   }
 
-  delay(5); 
+  delay(5);
 }
