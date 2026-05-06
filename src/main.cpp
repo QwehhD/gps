@@ -7,14 +7,14 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#include <lvgl.h>
+#include "../ui.h"
+#include "../screens/ui_watch_digital.h"
 
-// Forward declarations
-void updateCompass();
-void drawRandomRoads(int centerX, int centerY, float heading);
-void drawRoutePath(int centerX, int centerY, float heading);
-void drawEgocentricMapView();
-void setup();
-void loop();
+// Forward declarations for LVGL port
+extern void lv_port_disp_init(void);
+extern void lv_port_tick_inc(void);
+extern "C" void ui_update_gps(double lat, double lon, float speed, float heading, bool connected);
 
 TFT_eSPI tft = TFT_eSPI();
 Adafruit_NeoPixel pixels(1, 48, NEO_GRB + NEO_KHZ800);
@@ -35,22 +35,8 @@ struct CompassData
   float heading = 0.0;
 };
 
-struct RoutePoint
-{
-  double lat;
-  double lon;
-};
-
-struct RouteData
-{
-  RoutePoint waypoints[20];
-  int pointCount = 0;
-  bool hasRoute = false;
-};
-
 GPSData gpsData;
 CompassData compassData;
-RouteData routeData;
 
 // BLE variables
 BLEServer *pServer = NULL;
@@ -74,6 +60,16 @@ class MyServerCallbacks : public BLEServerCallbacks
     Serial.println("⚠ BLE Client disconnected");
     pServer->getAdvertising()->start();
   }
+
+  uint32_t onPassKeyRequest()
+  {
+    Serial.println("⚠ Passkey request (returning 0)");
+    return 0;
+  }
+
+  void onPassKeyNotify(uint32_t passKey) {}
+  bool onSecurityRequest() { return false; }
+  void onAuthenticationComplete(esp_ble_auth_cmpl_t cmpl) {}
 };
 
 class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
@@ -84,11 +80,12 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
     if (value.length() > 0)
     {
       String data = String((char *)value.c_str());
+      Serial.printf("📡 BLE RX (%d bytes): %s\n", value.length(), data.c_str());
 
+      // Parse GPS: format "GPS:lat,lon,speed"
       if (data.startsWith("GPS:"))
       {
-        // Format: GPS:lat,lon,speed
-        String gpsStr = data.substring(4);
+        String gpsStr = data.substring(4); // Remove "GPS:"
         int comma1 = gpsStr.indexOf(',');
         int comma2 = gpsStr.lastIndexOf(',');
 
@@ -103,150 +100,42 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
           gpsData.speed = speed;
           gpsData.hasData = true;
 
-          Serial.printf("GPS via BLE: %.4f, %.4f | Speed: %.1f km/h\n", lat, lon, speed);
+          Serial.printf("✓ GPS Updated: Lat=%.6f Lon=%.6f Speed=%.1f\n", lat, lon, speed);
         }
       }
+      // Parse ROUTE: format "ROUTE:lat1,lon1;lat2,lon2;..."
       else if (data.startsWith("ROUTE:"))
       {
-        // Format: ROUTE:lat1,lon1;lat2,lon2;lat3,lon3
-        String routeStr = data.substring(6);
-        routeData.pointCount = 0;
-
-        int start = 0;
-        while (start < routeStr.length() && routeData.pointCount < 20)
-        {
-          int semicolon = routeStr.indexOf(';', start);
-          if (semicolon == -1)
-            semicolon = routeStr.length();
-
-          String point = routeStr.substring(start, semicolon);
-          int comma = point.indexOf(',');
-
-          if (comma > 0)
-          {
-            routeData.waypoints[routeData.pointCount].lat = point.substring(0, comma).toDouble();
-            routeData.waypoints[routeData.pointCount].lon = point.substring(comma + 1).toDouble();
-            routeData.pointCount++;
-          }
-
-          start = semicolon + 1;
-        }
-
-        routeData.hasRoute = (routeData.pointCount > 0);
-        Serial.printf("Route received: %d waypoints\n", routeData.pointCount);
+        Serial.println("✓ Route data received");
+      }
+      else
+      {
+        Serial.printf("⚠ Unknown format: %s\n", data.c_str());
       }
     }
   }
 };
 
-void drawRandomRoads(int centerX, int centerY, float heading)
+// Old TFT_eSPI drawing functions removed - using LVGL UI instead
+// drawDestinationArrow, drawMapView, drawRandomRoads, drawRoutePath, drawEgocentricMapView
+
+void updateCompass()
 {
-  // Draw random road lines for visual reference (jalan acak tipis)
-  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-
-  float cosH = cos(heading * PI / 180);
-  float sinH = sin(heading * PI / 180);
-
-  // Horizontal roads (berubah sesuai heading)
-  for (int i = -80; i <= 80; i += 30)
+  sensors_event_t event;
+  if (mag.getEvent(&event))
   {
-    int x1 = centerX + (int)(i * cosH - 80 * sinH);
-    int y1 = centerY + (int)(i * sinH + 80 * cosH);
-    int x2 = centerX + (int)(i * cosH + 80 * sinH);
-    int y2 = centerY + (int)(i * sinH - 80 * cosH);
-
-    tft.drawLine(x1, y1, x2, y2, TFT_DARKGREY);
-  }
-
-  // Vertical roads
-  for (int i = -80; i <= 80; i += 30)
-  {
-    int x1 = centerX + (int)(-80 * cosH - i * sinH);
-    int y1 = centerY + (int)(-80 * sinH + i * cosH);
-    int x2 = centerX + (int)(80 * cosH - i * sinH);
-    int y2 = centerY + (int)(80 * sinH + i * cosH);
-
-    tft.drawLine(x1, y1, x2, y2, TFT_DARKGREY);
-  }
-}
-
-void drawRoutePath(int centerX, int centerY, float heading)
-{
-  if (!routeData.hasRoute || routeData.pointCount == 0)
-    return;
-
-  float cosH = cos(heading * PI / 180);
-  float sinH = sin(heading * PI / 180);
-
-  for (int i = 0; i < routeData.pointCount - 1; i++)
-  {
-    double dLat1 = routeData.waypoints[i].lat - gpsData.currentLat;
-    double dLon1 = routeData.waypoints[i].lon - gpsData.currentLon;
-    double dLat2 = routeData.waypoints[i + 1].lat - gpsData.currentLat;
-    double dLon2 = routeData.waypoints[i + 1].lon - gpsData.currentLon;
-
-    // Convert to screen coordinates (simplified)
-    int x1 = centerX + (int)(dLat1 * 10000 * cosH - dLon1 * 10000 * sinH);
-    int y1 = centerY + (int)(dLat1 * 10000 * sinH + dLon1 * 10000 * cosH);
-    int x2 = centerX + (int)(dLat2 * 10000 * cosH - dLon2 * 10000 * sinH);
-    int y2 = centerY + (int)(dLat2 * 10000 * sinH + dLon2 * 10000 * cosH);
-
-    tft.drawLine(x1, y1, x2, y2, TFT_WHITE);
-    tft.drawLine(x1 - 1, y1, x2 - 1, y2, TFT_WHITE);
-    tft.drawLine(x1 + 1, y1, x2 + 1, y2, TFT_WHITE);
-  }
-}
-
-void drawEgocentricMapView()
-{
-  tft.fillScreen(TFT_BLACK);
-
-  double dLat = gpsData.destLat - gpsData.currentLat;
-  double dLon = gpsData.destLon - gpsData.currentLon;
-  double distance = sqrt(dLat * dLat + dLon * dLon) * 111000;
-
-  String distStr;
-  if (distance < 1000)
-  {
-    distStr = String((int)distance) + "m";
+    float h = atan2(event.magnetic.y, event.magnetic.x);
+    if (h < 0)
+      h += 2 * M_PI;
+    compassData.heading = h * 180 / M_PI;
   }
   else
   {
-    distStr = String(distance / 1000, 1) + "km";
+    // Fallback to simulation if HMC fails
+    compassData.heading += 0.3;
+    if (compassData.heading >= 360)
+      compassData.heading = 0;
   }
-
-  int centerX = 120, centerY = 120;
-
-  // Draw random road grid
-  drawRandomRoads(centerX, centerY, compassData.heading);
-
-  // Draw main route if available
-  drawRoutePath(centerX, centerY, compassData.heading);
-
-  // Draw central compass point
-  tft.fillCircle(centerX, centerY, 4, TFT_CYAN);
-  tft.drawCircle(centerX, centerY, 10, TFT_CYAN);
-
-  // Draw direction pointer (always at top - egocentric!)
-  tft.fillTriangle(centerX - 6, centerY - 60, centerX + 6, centerY - 60, centerX, centerY - 45, TFT_RED);
-
-  // Draw distance at top
-  tft.fillRoundRect(20, 6, 200, 44, 10, TFT_DARKGREY);
-  tft.fillRoundRect(22, 8, 196, 40, 9, TFT_BLACK);
-  tft.setTextColor(TFT_DARKGREY, TFT_BLACK);
-  tft.drawCentreString("TARGET", 120, 10, 2);
-  tft.setTextColor(TFT_WHITE, TFT_BLACK);
-  tft.drawCentreString(distStr, 120, 22, 8);
-
-  // Status bar at bottom
-  tft.fillRoundRect(18, 200, 204, 28, 10, TFT_DARKGREY);
-  tft.fillRoundRect(20, 202, 200, 24, 9, TFT_BLACK);
-  tft.setTextColor(TFT_GREEN, TFT_BLACK);
-  tft.drawString(String((int)gpsData.speed) + " km/h", 28, 207, 2);
-  tft.setTextColor(TFT_YELLOW, TFT_BLACK);
-  tft.drawCentreString(String((int)compassData.heading) + String((char)247), 120, 208, 2);
-  tft.setTextColor(deviceConnected ? TFT_CYAN : TFT_DARKGREY, TFT_BLACK);
-  tft.drawRightString(deviceConnected ? "BLE OK" : "BLE --", 220, 208, 2);
 }
 
 void setup()
@@ -257,6 +146,10 @@ void setup()
 
   Serial.begin(115200);
   delay(500);
+
+  // Suppress BT stack debug logs
+  esp_log_level_set("BT_SMP", ESP_LOG_ERROR);
+  esp_log_level_set("BT_BTM", ESP_LOG_ERROR);
 
   Serial.println("\n=== GPS TRACKER SETUP ===");
   Serial.printf("Free heap: %d bytes\n", ESP.getFreeHeap());
@@ -269,94 +162,83 @@ void setup()
   tft.drawCentreString("INITIALIZING", 120, 100, 2);
 
   Wire.begin(2, 1);
-  Wire.setClock(50000);
+  Wire.setClock(100000);
 
-  // HMC5883L init attempt (non-blocking)
   if (mag.begin())
   {
-    Serial.println("✓ HMC5883L detected - using real compass");
+    Serial.println("✓ HMC5883L detected (GPIO2/1)");
     tft.drawCentreString("Compass OK", 120, 130, 2);
   }
   else
   {
-    Serial.println("⚠ HMC5883L not responding - using simulated heading");
-    Serial.println("  Check: GPIO2(SDA), GPIO1(SCL), GND, 3.3V");
-    Serial.println("  Add 10k pull-up resistors if needed");
+    Serial.println("⚠ HMC5883L not found - using simulated heading");
     tft.drawCentreString("No compass (sim)", 120, 130, 1);
   }
 
-  // Init BLE
+  // Init BLE with simpler config
   BLEDevice::init("GPS_Tracker_BLE");
+  BLEDevice::setMTU(517); // Increase MTU for larger packets
+
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new MyServerCallbacks());
 
   BLEService *pService = pServer->createService(SERVICE_UUID);
 
+  // TX Characteristic (Notify)
   pTxCharacteristic = pService->createCharacteristic(
       CHARACTERISTIC_TX,
       BLECharacteristic::PROPERTY_NOTIFY);
   pTxCharacteristic->addDescriptor(new BLE2902());
 
+  // RX Characteristic (Write - NO response needed)
   BLECharacteristic *pRxCharacteristic = pService->createCharacteristic(
       CHARACTERISTIC_RX,
-      BLECharacteristic::PROPERTY_WRITE);
+      BLECharacteristic::PROPERTY_WRITE_NR);
   pRxCharacteristic->setCallbacks(new MyCharacteristicCallbacks());
 
   pService->start();
 
+  // Configure advertising
   BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->addServiceUUID(SERVICE_UUID);
   pAdvertising->setScanResponse(true);
-  pAdvertising->setMinPreferred(0x0);
+  pAdvertising->setMinPreferred(0x00);
+  pAdvertising->setMaxPreferred(0x00);
+  pAdvertising->setMinInterval(0x20); // 32 * 0.625ms = 20ms
+  pAdvertising->setMaxInterval(0x40); // 64 * 0.625ms = 40ms
+
   BLEDevice::startAdvertising();
 
   Serial.println("✓ BLE started as 'GPS_Tracker_BLE'");
 
+  // Initialize LVGL
+  lv_init();
+  lv_port_disp_init();
+  ui_init();
+
   delay(2000);
-  Serial.println("Setup complete! Awaiting GPS data via BLE...\n");
+  Serial.println("Setup complete! LVGL watch UI ready...\n");
 }
 
 void loop()
 {
-  // BLE data already handled in callback
-  updateCompass();
-  drawEgocentricMapView();
-  delay(100);
-}
+  // Update LVGL
+  lv_timer_handler();
 
-void updateCompass()
-{
-  // Try real compass, fallback to simulated
-  sensors_event_t event;
-  static bool useRealCompass = true;
-  static int skipErrorCount = 0;
-  
-  if (useRealCompass)
+  // Update LVGL tick
+  lv_port_tick_inc();
+
+  // Update compass heading
+  updateCompass();
+
+  // Update UI with latest GPS data every 100ms
+  static uint32_t lastUpdate = 0;
+  if (millis() - lastUpdate > 100)
   {
-    // Try reading from HMC5883L (but don't spam errors)
-    if (mag.getEvent(&event))
-    {
-      if (abs(event.magnetic.x) > 0.5 || abs(event.magnetic.y) > 0.5)
-      {
-        float h = atan2(event.magnetic.y, event.magnetic.x);
-        if (h < 0) h += 2 * PI;
-        compassData.heading = h * 180 / M_PI;
-        skipErrorCount = 0;
-        return;
-      }
-    }
-    
-    skipErrorCount++;
-    if (skipErrorCount > 5)
-    {
-      // Sensor not responding, switch to simulated
-      useRealCompass = false;
-      Serial.println("Switching to simulated compass (sensor not responding)");
-    }
+    lastUpdate = millis();
+    ui_update_gps(gpsData.currentLat, gpsData.currentLon,
+                  gpsData.speed, compassData.heading, deviceConnected);
   }
-  
-  // Simulated compass (rotate slowly)
-  compassData.heading += 0.3;
-  if (compassData.heading >= 360)
-    compassData.heading = 0;
+
+  delay(5); // LVGL tick interval
 }
