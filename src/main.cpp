@@ -2,7 +2,6 @@
 #include <TFT_eSPI.h>
 #include <Adafruit_NeoPixel.h>
 #include <Wire.h>
-#include <Adafruit_HMC5883_U.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
@@ -18,7 +17,6 @@ extern "C" void ui_update_gps(double lat, double lon, float speed, float heading
 
 TFT_eSPI tft = TFT_eSPI();
 Adafruit_NeoPixel pixels(1, 48, NEO_GRB + NEO_KHZ800);
-Adafruit_HMC5883_Unified mag = Adafruit_HMC5883_Unified(12345);
 
 struct GPSData
 {
@@ -121,21 +119,18 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
 
 void updateCompass()
 {
-  sensors_event_t event;
-  if (mag.getEvent(&event))
+  // Simulate compass heading (0.5°/100ms = 180°/minute)
+  static uint32_t lastUpdate = 0;
+  if (millis() - lastUpdate > 100)
   {
-    float h = atan2(event.magnetic.y, event.magnetic.x);
-    if (h < 0)
-      h += 2 * M_PI;
-    compassData.heading = h * 180 / M_PI;
-  }
-  else
-  {
-    // Fallback to simulation if HMC fails
-    compassData.heading += 0.3;
+    lastUpdate = millis();
+    compassData.heading += 0.5;
     if (compassData.heading >= 360)
       compassData.heading = 0;
   }
+  
+  // TODO: Enable QMC5883L when library docs available
+  // For now, using simulated heading for UI testing
 }
 
 void setup()
@@ -162,18 +157,11 @@ void setup()
   tft.drawCentreString("INITIALIZING", 120, 100, 2);
 
   Wire.begin(2, 1);
-  Wire.setClock(100000);
+  Wire.setClock(50000);
 
-  if (mag.begin())
-  {
-    Serial.println("✓ HMC5883L detected (GPIO2/1)");
-    tft.drawCentreString("Compass OK", 120, 130, 2);
-  }
-  else
-  {
-    Serial.println("⚠ HMC5883L not found - using simulated heading");
-    tft.drawCentreString("No compass (sim)", 120, 130, 1);
-  }
+  Serial.println("⚠ QMC5883L disabled (pending library documentation)");
+  Serial.println("  Using simulated heading for UI testing");
+  tft.drawCentreString("QMC: SIM", 120, 130, 1);
 
   // Init BLE with simpler config
   BLEDevice::init("GPS_Tracker_BLE");
@@ -231,9 +219,9 @@ void loop()
   // Update compass heading
   updateCompass();
 
-  // Update UI with latest GPS data every 100ms
+  // Update UI with latest GPS data every 1 second (1000ms)
   static uint32_t lastUpdate = 0;
-  if (millis() - lastUpdate > 100)
+  if (millis() - lastUpdate >= 1000)
   {
     lastUpdate = millis();
     ui_update_gps(gpsData.currentLat, gpsData.currentLon,
