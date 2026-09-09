@@ -17,6 +17,19 @@ extern "C"
         ui_gps_tracker_screen_destroy();
     }
 
+    // Cheap: call every loop() iteration for a smooth heading-needle sweep.
+    void ui_update_nav_heading(float bearing_deg)
+    {
+        ui_gps_tracker_set_heading(bearing_deg);
+    }
+
+    // Heavier: call every few hundred ms to refresh speed/distance/maneuver
+    // text and (only on maneuver change) the schematic road preview.
+    void ui_update_nav_info(const nav_data_t *nav)
+    {
+        ui_gps_tracker_set_nav_info(nav);
+    }
+
     void ui_update_gps(double lat, double lon, float speed, float heading, int16_t x, int16_t y, int16_t z, bool connected)
     {
         char buf[128];

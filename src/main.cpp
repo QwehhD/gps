@@ -9,11 +9,14 @@
 #include <lvgl.h>
 #include "../ui.h"
 #include "../screens/ui_watch_digital.h"
+#include "nav_sim.h"
 
 // Forward declarations for LVGL port
 extern void lv_port_disp_init(void);
 extern void lv_port_tick_inc(void);
 extern "C" void ui_update_gps(double lat, double lon, float speed, float heading, int16_t x, int16_t y, int16_t z, bool connected);
+extern "C" void ui_update_nav_heading(float bearing_deg);
+extern "C" void ui_update_nav_info(const nav_data_t *nav);
 
 TFT_eSPI tft = TFT_eSPI();
 Adafruit_NeoPixel pixels(1, 48, NEO_GRB + NEO_KHZ800);
@@ -111,6 +114,10 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
   }
 };
 
+// QMC5883L polling. Left completely untouched, but NOT called anywhere
+// while USE_DUMMY_DATA is set (see nav_sim.h) — heading comes from the
+// simulator instead, with zero I2C traffic to the sensor.
+#if !USE_DUMMY_DATA
 void updateCompass()
 {
   static uint32_t lastUpdate = 0;
@@ -150,6 +157,7 @@ void updateCompass()
     }
   }
 }
+#endif // !USE_DUMMY_DATA
 
 void setup()
 {
@@ -171,22 +179,29 @@ void setup()
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
   tft.drawCentreString("GPS TRACKER", 120, 50, 4);
 
+#if USE_DUMMY_DATA
+  // Dummy-data mode: no I2C bus, no QMC5883L access at all — everything the
+  // UI shows (heading included) comes from nav_sim instead.
+  Serial.println("USE_DUMMY_DATA=1: skipping QMC5883L init, simulating nav data");
+  tft.drawCentreString("DUMMY DATA MODE", 120, 130, 2);
+  nav_sim_init();
+#else
   Wire.begin(2, 1);
   Wire.setClock(50000);
 
   // Initialize QMC5883L dengan prosedur Reset
   Wire.beginTransmission(0x0D);
-  Wire.write(0x0B); 
+  Wire.write(0x0B);
   if (Wire.endTransmission(false) == 0 && Wire.requestFrom(0x0D, 1) == 1)
   {
     byte chipID = Wire.read();
-    if (chipID == 0xFF) 
+    if (chipID == 0xFF)
     {
       Serial.printf("✓ QMC5883L detected (ChipID: 0x%02X)\n", chipID);
-      
+
       // 1. SOFT RESET
       Wire.beginTransmission(0x0D);
-      Wire.write(0x0A); 
+      Wire.write(0x0A);
       Wire.write(0x80); // Set Soft Reset
       Wire.endTransmission();
       delay(100);
@@ -194,12 +209,12 @@ void setup()
       // 2. SET/RESET PERIOD (Penting untuk memulai pengukuran)
       Wire.beginTransmission(0x0D);
       Wire.write(0x0B);
-      Wire.write(0x01); 
+      Wire.write(0x01);
       Wire.endTransmission();
 
       // 3. KONFIGURASI OPERASI (Continuous Mode)
       Wire.beginTransmission(0x0D);
-      Wire.write(0x09); 
+      Wire.write(0x09);
       Wire.write(0x1D); // 200Hz, 8G range, 512 oversampling, Continuous mode
       Wire.endTransmission();
 
@@ -215,6 +230,7 @@ void setup()
     Serial.println("⚠ QMC5883L not responding");
     tft.drawCentreString("QMC ERR", 120, 130, 1);
   }
+#endif // USE_DUMMY_DATA
 
   // BLE Setup (Tetap sesuai aslinya)
   BLEDevice::init("GPS_Tracker_BLE");
@@ -242,6 +258,27 @@ void loop()
   lv_timer_handler();
   lv_port_tick_inc();
 
+#if USE_DUMMY_DATA
+  // Advance the simulator every iteration and push the heading right away
+  // so the needle rotation stays smooth (~30fps+); heavier text/schematic
+  // updates are throttled below since they don't need frame-rate refresh.
+  nav_sim_update(millis());
+  const nav_data_t *nav = nav_sim_get_data();
+  ui_update_nav_heading(nav->bearing_deg);
+
+  static uint32_t lastNavInfoUpdate = 0;
+  if (millis() - lastNavInfoUpdate >= 200)
+  {
+    lastNavInfoUpdate = millis();
+    ui_update_nav_info(nav);
+    // GPS status label still reflects the real (already-implemented) BLE
+    // link; nav->ble_connected is a separate placeholder for the future
+    // nav phone-app protocol, not implemented yet (see docs).
+    ui_update_gps(gpsData.currentLat, gpsData.currentLon,
+                  nav->speed_kmh, nav->bearing_deg,
+                  0, 0, 0, deviceConnected);
+  }
+#else
   updateCompass();
 
   static uint32_t lastUpdate = 0;
@@ -249,9 +286,10 @@ void loop()
   {
     lastUpdate = millis();
     ui_update_gps(gpsData.currentLat, gpsData.currentLon,
-                  gpsData.speed, compassData.heading, 
+                  gpsData.speed, compassData.heading,
                   compassData.x, compassData.y, compassData.z, deviceConnected);
   }
+#endif // USE_DUMMY_DATA
 
   delay(5);
 }
