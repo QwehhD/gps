@@ -1,7 +1,8 @@
 // Navigation dummy-data simulator.
 //
 // Generates fake but smoothly-changing navigation data (heading, speed,
-// distance-to-turn, maneuver type, schematic road-shape points) so the LVGL
+// distance-to-turn, maneuver type, schematic road-shape points along an
+// endless random route, side roads at its junctions) so the LVGL
 // UI can be validated on real hardware before any sensor (QMC5883L), IMU or
 // BLE phone-app link exists. See docs/navigation-protocol.md for the field
 // meanings and how this maps to the future BLE payload.
@@ -44,7 +45,20 @@ extern "C"
         float y;
     } nav_point_t;
 
-#define NAV_SCHEMATIC_MAX_POINTS 8
+// The route line covers a window around the rider (a little behind, a lot
+// ahead), so it usually holds several upcoming turns, not just the next one.
+#define NAV_SCHEMATIC_MAX_POINTS 32
+
+    // A road branching off the route (the other arms of a junction), as a
+    // straight segment in the same local coordinates: `from` sits on the
+    // route, `to` is the far end (the UI fades the road out toward it).
+    typedef struct
+    {
+        nav_point_t from;
+        nav_point_t to;
+    } nav_side_road_t;
+
+#define NAV_SIDE_ROADS_MAX 8
 
     // Mirrors the planned BLE "NAV:" payload fields one-to-one, plus a
     // connection flag for the (not-yet-implemented) phone-app link. This is
@@ -57,9 +71,10 @@ extern "C"
         nav_maneuver_t maneuver;                              // upcoming maneuver type
         float total_distance_m;                               // remaining distance for the whole route
         float speed_kmh;                                      // current speed
-        uint16_t speed_limit_kmh;                             // posted limit on the current road, 0 = unknown (UI hides the sign)
-        nav_point_t schematic_points[NAV_SCHEMATIC_MAX_POINTS]; // road-shape preview, heading-up, local coords
+        nav_point_t schematic_points[NAV_SCHEMATIC_MAX_POINTS]; // route line, heading-up, local coords, rider at (0,0)
         uint8_t schematic_point_count;
+        nav_side_road_t side_roads[NAV_SIDE_ROADS_MAX];       // roads around the route, same coords
+        uint8_t side_road_count;
         bool ble_connected; // placeholder, always false in dummy mode
     } nav_data_t;
 
