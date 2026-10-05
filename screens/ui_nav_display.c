@@ -4,15 +4,12 @@
 #include <stdio.h>
 #include <string.h>
 
-LV_FONT_DECLARE(ui_font_H1);
-LV_FONT_DECLARE(ui_font_Title);
 LV_FONT_DECLARE(ui_font_Subtitle);
 
 lv_obj_t *ui_nav_display = NULL;
 
 static lv_obj_t *label_distance = NULL;
 static lv_obj_t *label_unit = NULL;
-static lv_obj_t *label_limit = NULL;
 
 // ---- Layout (px, 240x240 round panel) --------------------------------------
 #define CENTER_X 120
@@ -23,11 +20,18 @@ static lv_obj_t *label_limit = NULL;
 #define ROUTE_PX_PER_UNIT 4
 #define ROUTE_WIDTH 8
 
-// Rider arrow (chevron) sits just above the top of the bottom panel.
+// Side roads: thinner, grey-blue, fading out away from the route.
+#define SIDE_WIDTH 5
+#define SIDE_FADE_STEPS 6
+
+// Rider arrow (chevron) sits just above the top of the bottom panel. It is
+// drawn as a raised 3D chevron: soft shadow, a darker extruded underside,
+// and a lit left face next to a shaded right face.
 #define ARROW_TIP_Y 118
 #define ARROW_BASE_Y 148
 #define ARROW_NOTCH_Y 140
 #define ARROW_HALF_W 16
+#define ARROW_DEPTH 3 // extrusion below the chevron, px
 
 // Bottom panel is a dome: a big circle centered below the screen, so its top
 // edge curves (peak just under the arrow, shoulders meeting the bezel around
@@ -43,15 +47,9 @@ static lv_obj_t *label_limit = NULL;
 #define ICON_STROKE 6
 
 #define DIST_LABEL_X 109
-#define DIST_LABEL_Y 152
+#define DIST_LABEL_Y 155
 #define UNIT_LABEL_X 111
 #define UNIT_LABEL_Y 184
-
-// Speed-limit sign rests on the right shoulder of the dome.
-#define SIGN_CX 207
-#define SIGN_CY 154
-#define SIGN_R 21
-#define SIGN_RING 5
 
 // Progress arc hugging the bottom edge, filling left -> right as the turn
 // gets closer. It starts filling within PROGRESS_RANGE_M of the turn.
@@ -66,7 +64,11 @@ static lv_obj_t *label_limit = NULL;
 #define COLOR_BG lv_color_hex(0x0C0C20)
 #define COLOR_PANEL lv_color_hex(0x2C2C31)
 #define COLOR_ARC_BG lv_color_hex(0x5A5A62)
-#define COLOR_RED lv_color_hex(0xE03A2E)
+#define COLOR_SIDE lv_color_hex(0x7C8296)
+#define COLOR_ARROW_LIT lv_color_hex(0xFFFFFF)
+#define COLOR_ARROW_SHADED lv_color_hex(0xC2C7D2)
+#define COLOR_ARROW_EDGE_LIT lv_color_hex(0x8E94A3)
+#define COLOR_ARROW_EDGE_SHADED lv_color_hex(0x5F6574)
 
 // ---- Icon shapes (40x40 box, drawn pointing right/up) ----------------------
 typedef struct
@@ -95,21 +97,22 @@ static const icon_shape_t SHAPE_UTURN = {PATH_UTURN, COUNT(PATH_UTURN), {{32, 38
 // set() only stores targets; a timer eases the shown values toward them, so
 // the picture moves smoothly even if data arrives in steps (e.g. 1 Hz BLE).
 #define ANIM_PERIOD_MS 20
-#define EASE_RATE 10.0f    // 1/s, higher = snappier follow
+#define EASE_RATE 10.0f     // 1/s, higher = snappier follow
+#define SIDE_FADE_RATE 5.0f // 1/s, side roads fade in/out over ~200 ms
 
-// Every road is re-spaced into ROUTE_SAMPLES points ROUTE_SAMPLE_STEP units
-// apart along its length, counted from the rider: ROUTE_BEHIND_STEPS points
-// behind the arrow, the rest ahead (60 units, well past the screen edge).
-// Point i is then "the same spot relative to the rider" on any road, so a
-// new maneuver morphs out of the old road point by point instead of being
-// redrawn from scratch.
-#define ROUTE_SAMPLE_STEP 2.0f
-#define ROUTE_BEHIND_STEPS 4
-#define ROUTE_SAMPLES (ROUTE_BEHIND_STEPS + 31)
+// The route is re-spaced into ROUTE_SAMPLES points ROUTE_SAMPLE_STEP units
+// (5 px) apart along its length, counted from the rider: ROUTE_BEHIND_STEPS
+// points behind the arrow (10 units), the rest ahead (80 units, well past
+// the screen edge). Point i is then "the same spot relative to the rider" on
+// any update, so the line glides instead of being redrawn from scratch. The
+// spacing is dense enough that corners, drawn with the line's round caps,
+// come out round and do not wobble as the samples slide along the road.
+#define ROUTE_SAMPLE_STEP 1.25f
+#define ROUTE_BEHIND_STEPS 8
+#define ROUTE_SAMPLES (ROUTE_BEHIND_STEPS + 65)
 
-// Chaikin corner cutting on top of that rounds off what is left of corners.
-#define ROUTE_SMOOTH_PASSES 1
-#define ROUTE_DRAW_MAX (ROUTE_SAMPLES << ROUTE_SMOOTH_PASSES)
+// Room for every side road in the data plus the ones still fading out.
+#define SIDE_SLOTS (NAV_SIDE_ROADS_MAX * 2)
 
 // Screen areas redrawn while animating (the rest is left untouched).
 #define ROUTE_AREA_Y2 DOME_SHOULDER_Y
@@ -126,15 +129,25 @@ typedef struct
 
 typedef struct
 {
+    fpoint_t from, to;               // shown, schematic units
+    fpoint_t from_target, to_target; // latest data
+    float opa;                       // 0..1, fades in while alive, out after
+    bool alive;                      // present in the latest data
+    lv_point_t from_px, to_px;       // what was last drawn
+} side_view_t;
+
+typedef struct
+{
     fpoint_t route_target[ROUTE_SAMPLES]; // schematic units, evenly spaced
     fpoint_t route_shown[ROUTE_SAMPLES];
     bool route_valid; // false until a road with at least 2 points arrives
 
-    lv_point_t route_px[ROUTE_DRAW_MAX]; // smoothed, screen px
+    lv_point_t route_px[ROUTE_SAMPLES]; // screen px
     uint16_t route_px_count;
 
+    side_view_t sides[SIDE_SLOTS];
+
     nav_maneuver_t maneuver;
-    uint16_t speed_limit;
 
     float progress_target; // 0..1
     float progress_shown;
@@ -151,6 +164,13 @@ static char unit_text[3];
 // Layer coordinates of the screen's top-left corner (0,0 on this device, but
 // kept explicit so the drawing code stays position-independent).
 static int32_t off_x, off_y;
+
+static lv_point_t units_to_px(fpoint_t p)
+{
+    lv_point_t out = {CENTER_X + (int32_t)lroundf(p.x * ROUTE_PX_PER_UNIT),
+                      ROUTE_ORIGIN_Y - (int32_t)lroundf(p.y * ROUTE_PX_PER_UNIT)};
+    return out;
+}
 
 // ---- Small drawing helpers -------------------------------------------------
 static void draw_line(lv_layer_t *layer, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
@@ -171,12 +191,12 @@ static void draw_line(lv_layer_t *layer, int32_t x1, int32_t y1, int32_t x2, int
 }
 
 static void draw_tri(lv_layer_t *layer, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
-                     int32_t x3, int32_t y3, lv_color_t color)
+                     int32_t x3, int32_t y3, lv_color_t color, lv_opa_t opa)
 {
     lv_draw_triangle_dsc_t dsc;
     lv_draw_triangle_dsc_init(&dsc);
     dsc.color = color;
-    dsc.opa = LV_OPA_COVER;
+    dsc.opa = opa;
     dsc.p[0].x = off_x + x1;
     dsc.p[0].y = off_y + y1;
     dsc.p[1].x = off_x + x2;
@@ -203,6 +223,35 @@ static void draw_arc(lv_layer_t *layer, int32_t start_deg, int32_t end_deg, int3
 }
 
 // ---- Scene pieces, back to front -------------------------------------------
+static void draw_side_roads(lv_layer_t *layer)
+{
+    for (uint8_t i = 0; i < SIDE_SLOTS; i++)
+    {
+        const side_view_t *side = &view.sides[i];
+        if (side->opa <= 0.0f)
+        {
+            continue;
+        }
+        lv_point_t a = side->from_px;
+        lv_point_t b = side->to_px;
+
+        // Fade by blending toward the background colour. The pieces are
+        // opaque with round ends, so neighbours overlap instead of leaving
+        // anti-aliased seams between them.
+        for (uint8_t k = 0; k < SIDE_FADE_STEPS; k++)
+        {
+            float t0 = (float)k / SIDE_FADE_STEPS;
+            float t1 = (float)(k + 1) / SIDE_FADE_STEPS;
+            float strength = side->opa * (1.0f - t0 * 0.9f);
+            lv_color_t color = lv_color_mix(COLOR_SIDE, COLOR_BG, (uint8_t)(strength * 255.0f));
+            draw_line(layer,
+                      a.x + (int32_t)lroundf((b.x - a.x) * t0), a.y + (int32_t)lroundf((b.y - a.y) * t0),
+                      a.x + (int32_t)lroundf((b.x - a.x) * t1), a.y + (int32_t)lroundf((b.y - a.y) * t1),
+                      SIDE_WIDTH, color, LV_OPA_COVER);
+        }
+    }
+}
+
 static void draw_route(lv_layer_t *layer)
 {
     for (uint16_t i = 1; i < view.route_px_count; i++)
@@ -215,8 +264,8 @@ static void draw_route(lv_layer_t *layer)
 
 static void draw_panel(lv_layer_t *layer)
 {
-    // Drawn after the road so a road that runs behind the rider (U-turn) is
-    // cut off cleanly at the dome edge.
+    // Drawn after the roads so anything running behind the rider is cut off
+    // cleanly at the dome edge.
     lv_draw_rect_dsc_t dsc;
     lv_draw_rect_dsc_init(&dsc);
     dsc.bg_color = COLOR_PANEL;
@@ -238,13 +287,34 @@ static void draw_progress_arc(lv_layer_t *layer)
 
 static void draw_rider_arrow(lv_layer_t *layer)
 {
-    // Faint tail below the chevron, like a motion trail.
-    draw_line(layer, CENTER_X, ARROW_NOTCH_Y, CENTER_X, ARROW_BASE_Y + 14, 6, lv_color_white(), LV_OPA_30);
+    const int32_t cx = CENTER_X;
+    const int32_t lx = CENTER_X - ARROW_HALF_W;
+    const int32_t rx = CENTER_X + ARROW_HALF_W;
 
-    draw_tri(layer, CENTER_X, ARROW_TIP_Y,
-             CENTER_X - ARROW_HALF_W, ARROW_BASE_Y, CENTER_X, ARROW_NOTCH_Y, lv_color_white());
-    draw_tri(layer, CENTER_X, ARROW_TIP_Y,
-             CENTER_X, ARROW_NOTCH_Y, CENTER_X + ARROW_HALF_W, ARROW_BASE_Y, lv_color_white());
+    // Faint tail below the chevron, like a motion trail.
+    draw_line(layer, cx, ARROW_NOTCH_Y, cx, ARROW_BASE_Y + 14, 6, lv_color_white(), LV_OPA_30);
+
+    // Soft drop shadow: a few growing, offset triangles at low opacity whose
+    // overlap darkens toward the middle.
+    for (int32_t g = 3; g >= 1; g--)
+    {
+        draw_tri(layer, cx, ARROW_TIP_Y + 4 - g, lx - g, ARROW_BASE_Y + 5 + g, rx + g, ARROW_BASE_Y + 5 + g,
+                 lv_color_black(), LV_OPA_20);
+    }
+
+    // Extruded underside: the two bottom edges pushed down by ARROW_DEPTH.
+    draw_tri(layer, lx, ARROW_BASE_Y, cx, ARROW_NOTCH_Y, cx, ARROW_NOTCH_Y + ARROW_DEPTH,
+             COLOR_ARROW_EDGE_LIT, LV_OPA_COVER);
+    draw_tri(layer, lx, ARROW_BASE_Y, cx, ARROW_NOTCH_Y + ARROW_DEPTH, lx, ARROW_BASE_Y + ARROW_DEPTH,
+             COLOR_ARROW_EDGE_LIT, LV_OPA_COVER);
+    draw_tri(layer, cx, ARROW_NOTCH_Y, rx, ARROW_BASE_Y, rx, ARROW_BASE_Y + ARROW_DEPTH,
+             COLOR_ARROW_EDGE_SHADED, LV_OPA_COVER);
+    draw_tri(layer, cx, ARROW_NOTCH_Y, rx, ARROW_BASE_Y + ARROW_DEPTH, cx, ARROW_NOTCH_Y + ARROW_DEPTH,
+             COLOR_ARROW_EDGE_SHADED, LV_OPA_COVER);
+
+    // Top faces: light comes from the left.
+    draw_tri(layer, cx, ARROW_TIP_Y, lx, ARROW_BASE_Y, cx, ARROW_NOTCH_Y, COLOR_ARROW_LIT, LV_OPA_COVER);
+    draw_tri(layer, cx, ARROW_TIP_Y, cx, ARROW_NOTCH_Y, rx, ARROW_BASE_Y, COLOR_ARROW_SHADED, LV_OPA_COVER);
 }
 
 static void draw_maneuver_icon(lv_layer_t *layer)
@@ -282,25 +352,10 @@ static void draw_maneuver_icon(lv_layer_t *layer)
              ICON_X_AT(shape->head[0].x), ICON_Y_AT(shape->head[0].y),
              ICON_X_AT(shape->head[1].x), ICON_Y_AT(shape->head[1].y),
              ICON_X_AT(shape->head[2].x), ICON_Y_AT(shape->head[2].y),
-             lv_color_white());
+             lv_color_white(), LV_OPA_COVER);
 
 #undef ICON_X_AT
 #undef ICON_Y_AT
-}
-
-static void draw_speed_sign(lv_layer_t *layer)
-{
-    lv_draw_rect_dsc_t dsc;
-    lv_draw_rect_dsc_init(&dsc);
-    dsc.bg_color = lv_color_white();
-    dsc.bg_opa = LV_OPA_COVER;
-    dsc.radius = LV_RADIUS_CIRCLE;
-    dsc.border_color = COLOR_RED;
-    dsc.border_width = SIGN_RING;
-    dsc.border_opa = LV_OPA_COVER;
-    lv_area_t area = {off_x + SIGN_CX - SIGN_R, off_y + SIGN_CY - SIGN_R,
-                      off_x + SIGN_CX + SIGN_R, off_y + SIGN_CY + SIGN_R};
-    lv_draw_rect(layer, &dsc, &area);
 }
 
 static void nav_draw_cb(lv_event_t *e)
@@ -311,15 +366,12 @@ static void nav_draw_cb(lv_event_t *e)
     off_x = coords.x1;
     off_y = coords.y1;
 
+    draw_side_roads(layer);
     draw_route(layer);
     draw_panel(layer);
     draw_progress_arc(layer);
     draw_rider_arrow(layer);
     draw_maneuver_icon(layer);
-    if (view.speed_limit > 0)
-    {
-        draw_speed_sign(layer);
-    }
 }
 
 // ---- Text ------------------------------------------------------------------
@@ -352,7 +404,7 @@ static void format_distance(float meters, char *num, size_t num_size, char *unit
     }
 }
 
-// ---- Animation -------------------------------------------------------------
+// ---- Route geometry --------------------------------------------------------
 static void invalidate_rect(int32_t x1, int32_t y1, int32_t x2, int32_t y2)
 {
     lv_area_t coords;
@@ -424,54 +476,99 @@ static bool resample_route(const nav_data_t *nav, fpoint_t *out)
     return true;
 }
 
-// Schematic units -> px, then Chaikin-smoothed. Endpoints are kept so the
-// road still starts at the rider and still runs off the screen edge.
-static void rebuild_route_px(void)
+// Schematic units -> screen px. Returns true if any drawn pixel position
+// changed, so a sub-pixel glide does not trigger a redraw.
+static bool rebuild_route_px(void)
 {
-    static fpoint_t a[ROUTE_DRAW_MAX];
-    static fpoint_t b[ROUTE_DRAW_MAX];
     uint16_t n = view.route_valid ? ROUTE_SAMPLES : 0;
-
-    for (uint16_t i = 0; i < n; i++)
-    {
-        a[i].x = CENTER_X + view.route_shown[i].x * ROUTE_PX_PER_UNIT;
-        a[i].y = ROUTE_ORIGIN_Y - view.route_shown[i].y * ROUTE_PX_PER_UNIT;
-    }
-
-    fpoint_t *src = a;
-    fpoint_t *dst = b;
-    for (uint8_t pass = 0; pass < ROUTE_SMOOTH_PASSES && n >= 3; pass++)
-    {
-        uint16_t m = 0;
-        dst[m++] = src[0];
-        for (uint16_t i = 0; i + 1 < n; i++)
-        {
-            fpoint_t p = src[i];
-            fpoint_t q = src[i + 1];
-            if (i > 0)
-            {
-                dst[m++] = (fpoint_t){0.75f * p.x + 0.25f * q.x, 0.75f * p.y + 0.25f * q.y};
-            }
-            if (i + 2 < n)
-            {
-                dst[m++] = (fpoint_t){0.25f * p.x + 0.75f * q.x, 0.25f * p.y + 0.75f * q.y};
-            }
-        }
-        dst[m++] = src[n - 1];
-        n = m;
-        fpoint_t *tmp = src;
-        src = dst;
-        dst = tmp;
-    }
-
+    bool changed = n != view.route_px_count;
     view.route_px_count = n;
     for (uint16_t i = 0; i < n; i++)
     {
-        view.route_px[i].x = (int32_t)lroundf(src[i].x);
-        view.route_px[i].y = (int32_t)lroundf(src[i].y);
+        lv_point_t px = units_to_px(view.route_shown[i]);
+        changed |= px.x != view.route_px[i].x || px.y != view.route_px[i].y;
+        view.route_px[i] = px;
+    }
+    return changed;
+}
+
+// Pairs each side road in the new data with the one shown last time (start
+// nearby, pointing the same way) so it glides instead of jumping. Unmatched
+// new roads fade in; shown roads that disappeared fade out.
+static void update_side_targets(const nav_data_t *nav)
+{
+    bool claimed[SIDE_SLOTS] = {false};
+    uint8_t count = nav->side_road_count;
+    if (count > NAV_SIDE_ROADS_MAX)
+    {
+        count = NAV_SIDE_ROADS_MAX;
+    }
+
+    for (uint8_t i = 0; i < count; i++)
+    {
+        fpoint_t from = {nav->side_roads[i].from.x, nav->side_roads[i].from.y};
+        fpoint_t to = {nav->side_roads[i].to.x, nav->side_roads[i].to.y};
+        float dir_x = to.x - from.x;
+        float dir_y = to.y - from.y;
+        float dir_len = hypotf(dir_x, dir_y);
+        // Points far from the rider move further per update while turning.
+        float tolerance = 3.0f + 0.15f * hypotf(from.x, from.y);
+
+        int best = -1;
+        float best_dist = tolerance;
+        for (uint8_t j = 0; j < SIDE_SLOTS; j++)
+        {
+            side_view_t *side = &view.sides[j];
+            if (claimed[j] || (!side->alive && side->opa <= 0.0f))
+            {
+                continue;
+            }
+            float dist = hypotf(side->from_target.x - from.x, side->from_target.y - from.y);
+            float sx = side->to_target.x - side->from_target.x;
+            float sy = side->to_target.y - side->from_target.y;
+            float cosine = (sx * dir_x + sy * dir_y) / (hypotf(sx, sy) * dir_len + 1e-6f);
+            if (dist < best_dist && cosine > 0.8f)
+            {
+                best = j;
+                best_dist = dist;
+            }
+        }
+
+        if (best < 0)
+        {
+            for (uint8_t j = 0; j < SIDE_SLOTS; j++)
+            {
+                if (!claimed[j] && !view.sides[j].alive && view.sides[j].opa <= 0.0f)
+                {
+                    best = j;
+                    view.sides[j].from = from;
+                    view.sides[j].to = to;
+                    view.sides[j].opa = 0.0f;
+                    break;
+                }
+            }
+            if (best < 0)
+            {
+                continue; // no free slot; it will show up on a later update
+            }
+        }
+
+        claimed[best] = true;
+        view.sides[best].from_target = from;
+        view.sides[best].to_target = to;
+        view.sides[best].alive = true;
+    }
+
+    for (uint8_t j = 0; j < SIDE_SLOTS; j++)
+    {
+        if (!claimed[j])
+        {
+            view.sides[j].alive = false;
+        }
     }
 }
 
+// ---- Animation -------------------------------------------------------------
 // Moves `shown` toward `target` by fraction k; returns true if it moved.
 static bool ease_toward(float *shown, float target, float k)
 {
@@ -498,18 +595,49 @@ static void nav_anim_cb(lv_timer_t *timer)
     }
     float k = 1.0f - expf(-EASE_RATE * dt);
 
-    bool route_changed = false;
+    bool redraw_roads = false;
     if (view.route_valid)
     {
+        bool moved = false;
         for (uint8_t i = 0; i < ROUTE_SAMPLES; i++)
         {
-            route_changed |= ease_toward(&view.route_shown[i].x, view.route_target[i].x, k);
-            route_changed |= ease_toward(&view.route_shown[i].y, view.route_target[i].y, k);
+            moved |= ease_toward(&view.route_shown[i].x, view.route_target[i].x, k);
+            moved |= ease_toward(&view.route_shown[i].y, view.route_target[i].y, k);
+        }
+        if (moved)
+        {
+            redraw_roads |= rebuild_route_px();
         }
     }
-    if (route_changed)
+
+    for (uint8_t j = 0; j < SIDE_SLOTS; j++)
     {
-        rebuild_route_px();
+        side_view_t *side = &view.sides[j];
+        if (!side->alive && side->opa <= 0.0f)
+        {
+            continue;
+        }
+        float old_opa = side->opa;
+        side->opa += (side->alive ? dt : -dt) * SIDE_FADE_RATE;
+        side->opa = side->opa < 0.0f ? 0.0f : (side->opa > 1.0f ? 1.0f : side->opa);
+        ease_toward(&side->from.x, side->from_target.x, k);
+        ease_toward(&side->from.y, side->from_target.y, k);
+        ease_toward(&side->to.x, side->to_target.x, k);
+        ease_toward(&side->to.y, side->to_target.y, k);
+
+        lv_point_t from_px = units_to_px(side->from);
+        lv_point_t to_px = units_to_px(side->to);
+        if (side->opa != old_opa || from_px.x != side->from_px.x || from_px.y != side->from_px.y ||
+            to_px.x != side->to_px.x || to_px.y != side->to_px.y)
+        {
+            side->from_px = from_px;
+            side->to_px = to_px;
+            redraw_roads = true;
+        }
+    }
+
+    if (redraw_roads)
+    {
         invalidate_rect(0, 0, 239, ROUTE_AREA_Y2);
     }
 
@@ -541,20 +669,13 @@ void ui_nav_display_screen_init(void)
 
     // Labels are children, so they render on top of everything the draw
     // callback paints.
-    label_distance = make_label(&ui_font_H1, lv_color_white());
+    label_distance = make_label(&lv_font_montserrat_36, lv_color_white());
     lv_label_set_text(label_distance, "");
     lv_obj_set_pos(label_distance, DIST_LABEL_X, DIST_LABEL_Y);
 
-    label_unit = make_label(&ui_font_Title, lv_color_white());
+    label_unit = make_label(&ui_font_Subtitle, lv_color_white());
     lv_label_set_text(label_unit, "");
     lv_obj_set_pos(label_unit, UNIT_LABEL_X, UNIT_LABEL_Y);
-
-    label_limit = make_label(&ui_font_Subtitle, lv_color_hex(0x202020));
-    lv_label_set_text(label_limit, "");
-    lv_obj_set_width(label_limit, SIGN_R * 2);
-    lv_obj_set_style_text_align(label_limit, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
-    lv_obj_set_pos(label_limit, SIGN_CX - SIGN_R, SIGN_CY - 13);
-    lv_obj_add_flag(label_limit, LV_OBJ_FLAG_HIDDEN);
 
     anim_timer = lv_timer_create(nav_anim_cb, ANIM_PERIOD_MS, NULL);
 }
@@ -566,9 +687,8 @@ void ui_nav_display_set(const nav_data_t *nav)
         return;
     }
 
-    // The animation timer glides the shown road toward this target, including
-    // across maneuver changes, so a new turn bends out of the old road. Only
-    // the very first road (nothing shown yet) appears directly.
+    // The animation timer glides the shown route toward this target. Only
+    // the very first route (nothing shown yet) appears directly.
     if (resample_route(nav, view.route_target))
     {
         if (!view.route_valid)
@@ -586,6 +706,8 @@ void ui_nav_display_set(const nav_data_t *nav)
         invalidate_rect(0, 0, 239, ROUTE_AREA_Y2);
     }
 
+    update_side_targets(nav);
+
     if (nav->maneuver != view.maneuver)
     {
         view.maneuver = nav->maneuver;
@@ -594,23 +716,6 @@ void ui_nav_display_set(const nav_data_t *nav)
 
     float progress = 1.0f - nav->distance_to_turn_m / PROGRESS_RANGE_M;
     view.progress_target = progress < 0.0f ? 0.0f : (progress > 1.0f ? 1.0f : progress);
-
-    if (nav->speed_limit_kmh != view.speed_limit)
-    {
-        view.speed_limit = nav->speed_limit_kmh;
-        if (view.speed_limit > 0)
-        {
-            char buf[8];
-            snprintf(buf, sizeof(buf), "%u", (unsigned)view.speed_limit);
-            lv_label_set_text(label_limit, buf);
-            lv_obj_remove_flag(label_limit, LV_OBJ_FLAG_HIDDEN);
-        }
-        else
-        {
-            lv_obj_add_flag(label_limit, LV_OBJ_FLAG_HIDDEN);
-        }
-        lv_obj_invalidate(ui_nav_display);
-    }
 
     char num[12];
     char unit[3];
@@ -640,6 +745,5 @@ void ui_nav_display_screen_destroy(void)
         ui_nav_display = NULL;
         label_distance = NULL;
         label_unit = NULL;
-        label_limit = NULL;
     }
 }
