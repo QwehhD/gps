@@ -189,6 +189,28 @@ Gerakan dibuat halus di sisi UI, jadi data boleh datang patah-patah
 - Render LVGL memakai mode parsial dan jam dari `millis()`: hanya area yang
   posisi pikselnya benar-benar berubah yang digambar ulang dan dikirim ke
   layar.
+
+### Performa di ESP32-S3 (diukur di board)
+
+Frame yang bergerak butuh ±18–22 ms. Angka ini bisa dilihat sendiri dengan
+mengubah `LV_PORT_PERF_LOG` di `src/lv_port_disp.cpp` menjadi `1`: FPS,
+jeda terlama antar-frame, dan waktu render dicetak ke serial tiap 2 detik.
+Yang membuatnya cukup cepat untuk 40 fps stabil:
+
+- **DMA dengan dua buffer 240x68**: LVGL menggambar potongan berikutnya
+  sementara potongan sebelumnya dikirim lewat SPI. TFT_eSPI 2.5.43 punya bug
+  DMA di ESP32-S3 (callback akhir transfer menulis ke alamat register yang
+  salah sehingga board crash), jadi `lv_port_disp.cpp` mendaftarkan ulang
+  perangkat DMA-nya dengan callback yang benar.
+- **Refresh tiap 25 ms**, sedikit di atas waktu render terburuk. Periode yang
+  lebih pendek dari waktu render membuat jarak antar-frame berselang-seling
+  satu/dua periode dan terasa patah-patah. `loop()` hanya tidur 1 ms supaya
+  timer LVGL tidak bergeser.
+- **Garis rute disederhanakan** (Douglas–Peucker, 0,75 px) sebelum digambar,
+  dan ujung bulat hanya dipakai di tempat yang terlihat: LVGL menggambar
+  setiap ujung bulat sebagai lingkaran tersendiri yang lebih mahal dari
+  garisnya.
+- **`-O2`** menggantikan `-Os` bawaan framework (di `platformio.ini`).
 - Karena data dummy berupa rute menerus, belokan berikutnya sudah terlihat
   sebelum tiba, dan saat rider melewati belokan tampilan ikut berputar di
   sekitar panah (heading-up) tanpa ada garis yang diganti.
