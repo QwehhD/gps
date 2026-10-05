@@ -39,13 +39,16 @@ namespace
     {
         const nav_point_t *points;
         uint8_t count;
+        float turn_y; // how far ahead the turn sits when the leg starts
     };
 
+    // The road slides toward the rider by turn_y over the course of the leg,
+    // so the turn reaches the arrow right as the distance hits 0.
     const PresetInfo PRESETS[NAV_MANEUVER_COUNT] = {
-        {PRESET_STRAIGHT, sizeof(PRESET_STRAIGHT) / sizeof(PRESET_STRAIGHT[0])},
-        {PRESET_LEFT, sizeof(PRESET_LEFT) / sizeof(PRESET_LEFT[0])},
-        {PRESET_RIGHT, sizeof(PRESET_RIGHT) / sizeof(PRESET_RIGHT[0])},
-        {PRESET_UTURN, sizeof(PRESET_UTURN) / sizeof(PRESET_UTURN[0])},
+        {PRESET_STRAIGHT, sizeof(PRESET_STRAIGHT) / sizeof(PRESET_STRAIGHT[0]), 0.0f},
+        {PRESET_LEFT, sizeof(PRESET_LEFT) / sizeof(PRESET_LEFT[0]), 16.0f},
+        {PRESET_RIGHT, sizeof(PRESET_RIGHT) / sizeof(PRESET_RIGHT[0]), 16.0f},
+        {PRESET_UTURN, sizeof(PRESET_UTURN) / sizeof(PRESET_UTURN[0]), 12.0f},
     };
 
     nav_data_t g_nav;
@@ -61,10 +64,14 @@ namespace
     void apply_preset(nav_maneuver_t maneuver)
     {
         const PresetInfo &preset = PRESETS[maneuver];
+        float leg_progress = 1.0f - g_nav.distance_to_turn_m / DISTANCE_START_M;
+        float shift = preset.turn_y * fminf(fmaxf(leg_progress, 0.0f), 1.0f);
+
         g_nav.schematic_point_count = preset.count;
         for (uint8_t i = 0; i < preset.count; i++)
         {
-            g_nav.schematic_points[i] = preset.points[i];
+            g_nav.schematic_points[i].x = preset.points[i].x;
+            g_nav.schematic_points[i].y = preset.points[i].y - shift;
         }
     }
 
@@ -130,6 +137,10 @@ void nav_sim_update(uint32_t now_ms)
     if (g_nav.distance_to_turn_m <= 0.0f)
     {
         advance_to_next_leg();
+    }
+    else
+    {
+        apply_preset(g_nav.maneuver);
     }
 }
 

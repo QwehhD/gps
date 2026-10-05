@@ -20,14 +20,20 @@ static void disp_flush(lv_display_t *disp, const lv_area_t *area, uint8_t *px_ma
     lv_display_flush_ready(disp);
 }
 
-void lv_port_disp_init(void)
+// LVGL reads real elapsed time from millis(), so animations and the refresh
+// period stay correct no matter how long each loop() iteration takes.
+static uint32_t tick_get_cb(void)
 {
-    display = lv_display_create(240, 240);
-    lv_display_set_buffers(display, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_FULL);
-    lv_display_set_flush_cb(display, disp_flush);
+    return millis();
 }
 
-void lv_port_tick_inc(void)
+void lv_port_disp_init(void)
 {
-    lv_tick_inc(1);
+    lv_tick_set_cb(tick_get_cb);
+
+    display = lv_display_create(240, 240);
+    // Partial mode: only invalidated areas are rendered and pushed over SPI,
+    // so small per-frame changes (progress arc, moving road) stay cheap.
+    lv_display_set_buffers(display, buf, NULL, sizeof(buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
+    lv_display_set_flush_cb(display, disp_flush);
 }

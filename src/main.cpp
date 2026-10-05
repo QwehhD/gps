@@ -13,7 +13,6 @@
 
 // Forward declarations for LVGL port
 extern void lv_port_disp_init(void);
-extern void lv_port_tick_inc(void);
 extern "C" void ui_update_gps(double lat, double lon, float speed, float heading, int16_t x, int16_t y, int16_t z, bool connected);
 extern "C" void ui_update_nav_heading(float bearing_deg);
 extern "C" void ui_update_nav_info(const nav_data_t *nav);
@@ -256,7 +255,6 @@ void setup()
 void loop()
 {
   lv_timer_handler();
-  lv_port_tick_inc();
 
 #if USE_DUMMY_DATA
   // Advance the simulator every iteration and push the heading right away

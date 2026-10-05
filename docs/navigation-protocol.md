@@ -148,6 +148,20 @@ dan hanya membaca `nav_data_t`:
 - **Busur progres** di tepi bawah: terisi dari kiri ke kanan dalam 500 m
   terakhir sebelum belokan (`PROGRESS_RANGE_M`), kosong kalau masih jauh.
 
+Gerakan dibuat halus di sisi UI, jadi data boleh datang patah-patah
+(mis. BLE 1x per detik):
+
+- `ui_nav_display_set()` hanya menyimpan target. Timer LVGL 20 ms
+  menggerakkan garis jalan dan busur progres ke target dengan easing.
+- Garis jalan dihaluskan (Chaikin, 3 kali), jadi titik skematik yang kasar
+  pun tampil sebagai kurva.
+- Kalau maneuver atau jumlah titik berubah, jalan baru "tergambar" dari
+  panah ke depan dalam ~600 ms.
+- Render LVGL memakai mode parsial dan jam dari `millis()`: hanya area yang
+  berubah yang digambar ulang dan dikirim ke layar.
+- Di mode dummy, jalan bergeser mendekati panah seiring `distance_to_turn_m`
+  berkurang, sehingga belokan tiba di panah saat jarak 0.
+
 Layar debug lama (lat/lon, kompas X/Y/Z, jarum heading) masih ada: ubah
 `UI_START_DEBUG_SCREEN` di `src/ui_init.cpp` menjadi `1` untuk memakainya.
 

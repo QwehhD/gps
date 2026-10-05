@@ -86,17 +86,52 @@ static const icon_shape_t SHAPE_STRAIGHT = {PATH_STRAIGHT, COUNT(PATH_STRAIGHT),
 static const icon_shape_t SHAPE_TURN = {PATH_TURN, COUNT(PATH_TURN), {{40, 14}, {28, 5}, {28, 23}}};
 static const icon_shape_t SHAPE_UTURN = {PATH_UTURN, COUNT(PATH_UTURN), {{32, 38}, {23, 24}, {41, 24}}};
 
+// ---- Animation -------------------------------------------------------------
+// set() only stores targets; a timer eases the shown values toward them, so
+// the picture moves smoothly even if data arrives in steps (e.g. 1 Hz BLE).
+#define ANIM_PERIOD_MS 20
+#define EASE_RATE 10.0f    // 1/s, higher = snappier follow
+#define REVEAL_MS 600     // new road "draws itself" from the rider forward
+
+// Chaikin corner cutting turns the coarse schematic into a smooth curve.
+#define ROUTE_SMOOTH_PASSES 3
+#define ROUTE_DRAW_MAX (NAV_SCHEMATIC_MAX_POINTS << ROUTE_SMOOTH_PASSES)
+
+// Screen areas redrawn while animating (the rest is left untouched).
+#define ROUTE_AREA_Y2 (PANEL_Y - 1)
+#define ARC_AREA_X1 40
+#define ARC_AREA_Y1 196
+#define ARC_AREA_X2 200
+#define ARC_AREA_Y2 236
+
 // ---- View state (what the draw callback renders) ---------------------------
 typedef struct
 {
-    lv_point_t route[NAV_SCHEMATIC_MAX_POINTS]; // already in screen px
+    float x, y;
+} fpoint_t;
+
+typedef struct
+{
+    fpoint_t route_target[NAV_SCHEMATIC_MAX_POINTS]; // schematic units
+    fpoint_t route_shown[NAV_SCHEMATIC_MAX_POINTS];
     uint8_t route_count;
+    float reveal; // 0..1
+
+    lv_point_t route_px[ROUTE_DRAW_MAX]; // smoothed, screen px
+    uint16_t route_px_count;
+
     nav_maneuver_t maneuver;
     uint16_t speed_limit;
-    int32_t progress_deg; // 0..ARC_SPAN_DEG
+
+    float progress_target; // 0..1
+    float progress_shown;
+    int32_t progress_deg; // what was last drawn, 0..ARC_SPAN_DEG
+
+    uint32_t last_tick;
 } nav_view_t;
 
 static nav_view_t view;
+static lv_timer_t *anim_timer = NULL;
 static char distance_text[12];
 static char unit_text[3];
 
@@ -167,11 +202,40 @@ static void draw_box(lv_layer_t *layer, int32_t x1, int32_t y1, int32_t x2, int3
 // ---- Scene pieces, back to front -------------------------------------------
 static void draw_route(lv_layer_t *layer)
 {
-    for (uint8_t i = 1; i < view.route_count; i++)
+    if (view.route_px_count < 2)
     {
-        draw_line(layer, view.route[i - 1].x, view.route[i - 1].y,
-                  view.route[i].x, view.route[i].y,
-                  ROUTE_WIDTH, lv_color_white(), LV_OPA_COVER);
+        return;
+    }
+
+    // While revealing, draw only the first part of the road (by length),
+    // easing out so it shoots forward and then settles. Lengths are measured
+    // with points clamped to the screen, so the long off-screen tail doesn't
+    // eat up the animation time.
+    float seg_len[ROUTE_DRAW_MAX];
+    float total = 0.0f;
+    for (uint16_t i = 1; i < view.route_px_count; i++)
+    {
+        float ax = LV_CLAMP(0, view.route_px[i - 1].x, 239), ay = LV_CLAMP(0, view.route_px[i - 1].y, 239);
+        float bx = LV_CLAMP(0, view.route_px[i].x, 239), by = LV_CLAMP(0, view.route_px[i].y, 239);
+        seg_len[i] = hypotf(bx - ax, by - ay);
+        total += seg_len[i];
+    }
+    float t = 1.0f - view.reveal;
+    float remaining = total * (1.0f - t * t * t);
+
+    for (uint16_t i = 1; i < view.route_px_count && remaining > 0.0f; i++)
+    {
+        lv_point_t a = view.route_px[i - 1];
+        lv_point_t b = view.route_px[i];
+        float len = seg_len[i];
+        if (len > remaining)
+        {
+            float f = remaining / len;
+            b.x = a.x + (int32_t)lroundf((b.x - a.x) * f);
+            b.y = a.y + (int32_t)lroundf((b.y - a.y) * f);
+        }
+        draw_line(layer, a.x, a.y, b.x, b.y, ROUTE_WIDTH, lv_color_white(), LV_OPA_COVER);
+        remaining -= len;
     }
 }
 
@@ -307,11 +371,126 @@ static void format_distance(float meters, char *num, size_t num_size, char *unit
     }
 }
 
+// ---- Animation -------------------------------------------------------------
+static void invalidate_rect(int32_t x1, int32_t y1, int32_t x2, int32_t y2)
+{
+    lv_area_t coords;
+    lv_obj_get_coords(ui_nav_display, &coords);
+    lv_area_t area = {coords.x1 + x1, coords.y1 + y1, coords.x1 + x2, coords.y1 + y2};
+    lv_obj_invalidate_area(ui_nav_display, &area);
+}
+
+// Schematic units -> px, then Chaikin-smoothed. Endpoints are kept so the
+// road still starts at the rider and still runs off the screen edge.
+static void rebuild_route_px(void)
+{
+    static fpoint_t a[ROUTE_DRAW_MAX];
+    static fpoint_t b[ROUTE_DRAW_MAX];
+    uint16_t n = view.route_count;
+
+    for (uint16_t i = 0; i < n; i++)
+    {
+        a[i].x = CENTER_X + view.route_shown[i].x * ROUTE_PX_PER_UNIT;
+        a[i].y = ROUTE_ORIGIN_Y - view.route_shown[i].y * ROUTE_PX_PER_UNIT;
+    }
+
+    fpoint_t *src = a;
+    fpoint_t *dst = b;
+    for (uint8_t pass = 0; pass < ROUTE_SMOOTH_PASSES && n >= 3; pass++)
+    {
+        uint16_t m = 0;
+        dst[m++] = src[0];
+        for (uint16_t i = 0; i + 1 < n; i++)
+        {
+            fpoint_t p = src[i];
+            fpoint_t q = src[i + 1];
+            if (i > 0)
+            {
+                dst[m++] = (fpoint_t){0.75f * p.x + 0.25f * q.x, 0.75f * p.y + 0.25f * q.y};
+            }
+            if (i + 2 < n)
+            {
+                dst[m++] = (fpoint_t){0.25f * p.x + 0.75f * q.x, 0.25f * p.y + 0.75f * q.y};
+            }
+        }
+        dst[m++] = src[n - 1];
+        n = m;
+        fpoint_t *tmp = src;
+        src = dst;
+        dst = tmp;
+    }
+
+    view.route_px_count = n;
+    for (uint16_t i = 0; i < n; i++)
+    {
+        view.route_px[i].x = (int32_t)lroundf(src[i].x);
+        view.route_px[i].y = (int32_t)lroundf(src[i].y);
+    }
+}
+
+// Moves `shown` toward `target` by fraction k; returns true if it moved.
+static bool ease_toward(float *shown, float target, float k)
+{
+    float diff = target - *shown;
+    if (fabsf(diff) < 0.01f)
+    {
+        bool moved = *shown != target;
+        *shown = target;
+        return moved;
+    }
+    *shown += diff * k;
+    return true;
+}
+
+static void nav_anim_cb(lv_timer_t *timer)
+{
+    (void)timer;
+    uint32_t now = lv_tick_get();
+    float dt = lv_tick_diff(now, view.last_tick) / 1000.0f;
+    view.last_tick = now;
+    if (dt > 0.1f)
+    {
+        dt = 0.1f; // after a stall, catch up gently instead of jumping
+    }
+    float k = 1.0f - expf(-EASE_RATE * dt);
+
+    bool route_changed = false;
+    for (uint8_t i = 0; i < view.route_count; i++)
+    {
+        route_changed |= ease_toward(&view.route_shown[i].x, view.route_target[i].x, k);
+        route_changed |= ease_toward(&view.route_shown[i].y, view.route_target[i].y, k);
+    }
+    if (view.reveal < 1.0f)
+    {
+        view.reveal += dt * 1000.0f / REVEAL_MS;
+        if (view.reveal > 1.0f)
+        {
+            view.reveal = 1.0f;
+        }
+        route_changed = true;
+    }
+    if (route_changed)
+    {
+        rebuild_route_px();
+        invalidate_rect(0, 0, 239, ROUTE_AREA_Y2);
+    }
+
+    ease_toward(&view.progress_shown, view.progress_target, k);
+    int32_t deg = (int32_t)lroundf(view.progress_shown * ARC_SPAN_DEG);
+    if (deg != view.progress_deg)
+    {
+        view.progress_deg = deg;
+        invalidate_rect(ARC_AREA_X1, ARC_AREA_Y1, ARC_AREA_X2, ARC_AREA_Y2);
+    }
+}
+
 // ---- Public API ------------------------------------------------------------
 void ui_nav_display_screen_init(void)
 {
     memset(&view, 0, sizeof(view));
     view.maneuver = NAV_MANEUVER_STRAIGHT;
+    view.reveal = 1.0f;
+    view.last_tick = lv_tick_get();
     distance_text[0] = '\0';
     unit_text[0] = '\0';
 
@@ -339,6 +518,8 @@ void ui_nav_display_screen_init(void)
     lv_obj_set_style_text_align(label_limit, LV_TEXT_ALIGN_CENTER, LV_PART_MAIN);
     lv_obj_set_pos(label_limit, SIGN_CX - SIGN_R, SIGN_CY - 13);
     lv_obj_add_flag(label_limit, LV_OBJ_FLAG_HIDDEN);
+
+    anim_timer = lv_timer_create(nav_anim_cb, ANIM_PERIOD_MS, NULL);
 }
 
 void ui_nav_display_set(const nav_data_t *nav)
@@ -348,41 +529,35 @@ void ui_nav_display_set(const nav_data_t *nav)
         return;
     }
 
-    bool dirty = false;
-
-    // Road line: schematic units (x lateral, y forward) -> screen px.
-    lv_point_t route[NAV_SCHEMATIC_MAX_POINTS];
     uint8_t count = nav->schematic_point_count;
     if (count > NAV_SCHEMATIC_MAX_POINTS)
     {
         count = NAV_SCHEMATIC_MAX_POINTS;
     }
+
+    // A different road (new maneuver or point layout) can't be morphed into
+    // from the old one, so it snaps in and draws itself instead.
+    bool new_road = count != view.route_count || nav->maneuver != view.maneuver;
     for (uint8_t i = 0; i < count; i++)
     {
-        route[i].x = CENTER_X + (int32_t)lroundf(nav->schematic_points[i].x * ROUTE_PX_PER_UNIT);
-        route[i].y = ROUTE_ORIGIN_Y - (int32_t)lroundf(nav->schematic_points[i].y * ROUTE_PX_PER_UNIT);
+        view.route_target[i].x = nav->schematic_points[i].x;
+        view.route_target[i].y = nav->schematic_points[i].y;
     }
-    if (count != view.route_count || memcmp(route, view.route, count * sizeof(route[0])) != 0)
+    if (new_road)
     {
-        memcpy(view.route, route, count * sizeof(route[0]));
         view.route_count = count;
-        dirty = true;
+        memcpy(view.route_shown, view.route_target, count * sizeof(view.route_target[0]));
+        view.reveal = 0.0f;
     }
 
     if (nav->maneuver != view.maneuver)
     {
         view.maneuver = nav->maneuver;
-        dirty = true;
+        lv_obj_invalidate(ui_nav_display);
     }
 
     float progress = 1.0f - nav->distance_to_turn_m / PROGRESS_RANGE_M;
-    progress = progress < 0.0f ? 0.0f : (progress > 1.0f ? 1.0f : progress);
-    int32_t progress_deg = (int32_t)lroundf(progress * ARC_SPAN_DEG);
-    if (progress_deg != view.progress_deg)
-    {
-        view.progress_deg = progress_deg;
-        dirty = true;
-    }
+    view.progress_target = progress < 0.0f ? 0.0f : (progress > 1.0f ? 1.0f : progress);
 
     if (nav->speed_limit_kmh != view.speed_limit)
     {
@@ -398,7 +573,7 @@ void ui_nav_display_set(const nav_data_t *nav)
         {
             lv_obj_add_flag(label_limit, LV_OBJ_FLAG_HIDDEN);
         }
-        dirty = true;
+        lv_obj_invalidate(ui_nav_display);
     }
 
     char num[12];
@@ -414,15 +589,15 @@ void ui_nav_display_set(const nav_data_t *nav)
         strcpy(unit_text, unit);
         lv_label_set_text(label_unit, unit);
     }
-
-    if (dirty)
-    {
-        lv_obj_invalidate(ui_nav_display);
-    }
 }
 
 void ui_nav_display_screen_destroy(void)
 {
+    if (anim_timer != NULL)
+    {
+        lv_timer_delete(anim_timer);
+        anim_timer = NULL;
+    }
     if (ui_nav_display != NULL)
     {
         lv_obj_del(ui_nav_display);
