@@ -192,16 +192,20 @@ Gerakan dibuat halus di sisi UI, jadi data boleh datang patah-patah
 
 ### Performa di ESP32-S3 (diukur di board)
 
-Frame yang bergerak butuh ±18–22 ms. Angka ini bisa dilihat sendiri dengan
+Frame yang bergerak butuh ±16–19 ms. Angka ini bisa dilihat sendiri dengan
 mengubah `LV_PORT_PERF_LOG` di `src/lv_port_disp.cpp` menjadi `1`: FPS,
 jeda terlama antar-frame, dan waktu render dicetak ke serial tiap 2 detik.
 Yang membuatnya cukup cepat untuk 40 fps stabil:
 
-- **DMA dengan dua buffer 240x68**: LVGL menggambar potongan berikutnya
-  sementara potongan sebelumnya dikirim lewat SPI. TFT_eSPI 2.5.43 punya bug
-  DMA di ESP32-S3 (callback akhir transfer menulis ke alamat register yang
-  salah sehingga board crash), jadi `lv_port_disp.cpp` mendaftarkan ulang
-  perangkat DMA-nya dengan callback yang benar.
+- **DMA lewat `esp_lcd` (ESP-IDF) dengan dua buffer 240x68**: LVGL
+  menggambar potongan berikutnya sementara potongan sebelumnya dikirim
+  lewat SPI. TFT_eSPI hanya dipakai di `setup()` untuk inisialisasi panel
+  dan teks pembuka; setelah itu perintah alamat dan piksel sama-sama lewat
+  `esp_lcd`. DMA milik TFT_eSPI sendiri sempat dicoba dan tidak bisa
+  dipakai di board ini: versi 2.5.43 crash di callback akhir transfernya
+  di ESP32-S3, dan setelah crash itu diakali, panel mengabaikan semua frame
+  karena tulisan register langsung TFT_eSPI bercampur dengan transfer DMA
+  driver IDF (layar tertahan di teks pembuka).
 - **Refresh tiap 25 ms**, sedikit di atas waktu render terburuk. Periode yang
   lebih pendek dari waktu render membuat jarak antar-frame berselang-seling
   satu/dua periode dan terasa patah-patah. `loop()` hanya tidur 1 ms supaya
