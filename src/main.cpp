@@ -13,10 +13,10 @@
 
 // Forward declarations for LVGL port
 extern void lv_port_disp_init(void);
-extern void lv_port_tick_inc(void);
 extern "C" void ui_update_gps(double lat, double lon, float speed, float heading, int16_t x, int16_t y, int16_t z, bool connected);
 extern "C" void ui_update_nav_heading(float bearing_deg);
 extern "C" void ui_update_nav_info(const nav_data_t *nav);
+extern "C" void ui_update_nav_display(const nav_data_t *nav);
 
 TFT_eSPI tft = TFT_eSPI();
 Adafruit_NeoPixel pixels(1, 48, NEO_GRB + NEO_KHZ800);
@@ -256,15 +256,16 @@ void setup()
 void loop()
 {
   lv_timer_handler();
-  lv_port_tick_inc();
 
 #if USE_DUMMY_DATA
-  // Advance the simulator every iteration and push the heading right away
-  // so the needle rotation stays smooth (~30fps+); heavier text/schematic
-  // updates are throttled below since they don't need frame-rate refresh.
+  // Advance the simulator every iteration and push the heading and the
+  // navigation display data right away so they move smoothly (~30fps+); the
+  // debug screen's text/schematic updates are throttled below since they
+  // don't need frame-rate refresh.
   nav_sim_update(millis());
   const nav_data_t *nav = nav_sim_get_data();
   ui_update_nav_heading(nav->bearing_deg);
+  ui_update_nav_display(nav);
 
   static uint32_t lastNavInfoUpdate = 0;
   if (millis() - lastNavInfoUpdate >= 200)

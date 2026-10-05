@@ -1,20 +1,35 @@
 #include <lvgl.h>
 #include <stdio.h>
 #include "../screens/ui_gps_tracker.h"
+#include "../screens/ui_nav_display.h"
+
+// 0 = turn-by-turn navigation display (default), 1 = the old text/debug
+// screen with lat/lon, compass X/Y/Z, heading needle and schematic preview.
+// Only the selected screen is created; the update functions below skip the
+// other one because its widget pointers stay NULL.
+#define UI_START_DEBUG_SCREEN 0
 
 extern "C"
 {
 
     void ui_init(void)
     {
-        // Initialize GPS tracker screen
+#if UI_START_DEBUG_SCREEN
         ui_gps_tracker_screen_init();
         lv_scr_load(ui_gps_tracker);
+#else
+        ui_nav_display_screen_init();
+        lv_scr_load(ui_nav_display);
+#endif
     }
 
     void ui_destroy(void)
     {
-        ui_gps_tracker_screen_destroy();
+        if (ui_gps_tracker)
+        {
+            ui_gps_tracker_screen_destroy();
+        }
+        ui_nav_display_screen_destroy();
     }
 
     // Cheap: call every loop() iteration for a smooth heading-needle sweep.
@@ -28,6 +43,14 @@ extern "C"
     void ui_update_nav_info(const nav_data_t *nav)
     {
         ui_gps_tracker_set_nav_info(nav);
+    }
+
+    // Cheap: call every loop() iteration. The navigation display eases toward
+    // whatever it was given last, so a steadily updated target keeps the road
+    // and progress arc moving smoothly instead of in 200 ms steps.
+    void ui_update_nav_display(const nav_data_t *nav)
+    {
+        ui_nav_display_set(nav);
     }
 
     void ui_update_gps(double lat, double lon, float speed, float heading, int16_t x, int16_t y, int16_t z, bool connected)
