@@ -57,6 +57,7 @@ extern "C"
         nav_maneuver_t maneuver;                              // upcoming maneuver type
         float total_distance_m;                               // remaining distance for the whole route
         float speed_kmh;                                      // current speed
+        uint16_t speed_limit_kmh;                             // posted limit on the current road, 0 = unknown (UI hides the sign)
         nav_point_t schematic_points[NAV_SCHEMATIC_MAX_POINTS]; // road-shape preview, heading-up, local coords
         uint8_t schematic_point_count;
         bool ble_connected; // placeholder, always false in dummy mode
