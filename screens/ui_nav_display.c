@@ -22,7 +22,8 @@ static lv_obj_t *label_unit = NULL;
 
 // Side roads: thinner, grey-blue, fading out away from the route.
 #define SIDE_WIDTH 5
-#define SIDE_FADE_STEPS 6
+#define SIDE_FADE_STEPS 4
+#define SIDE_PIECE_OVERLAP_PX 2.0f
 
 // Rider arrow (chevron) sits just above the top of the bottom panel. It is
 // drawn as a raised 3D chevron: soft shadow, a darker extruded underside,
@@ -111,6 +112,11 @@ static const icon_shape_t SHAPE_UTURN = {PATH_UTURN, COUNT(PATH_UTURN), {{32, 38
 #define ROUTE_BEHIND_STEPS 8
 #define ROUTE_SAMPLES (ROUTE_BEHIND_STEPS + 65)
 
+// Before drawing, straight runs of samples are merged into single segments
+// (Douglas-Peucker within this many px), so the line costs a dozen or so
+// draw calls instead of ~70 while looking the same.
+#define ROUTE_SIMPLIFY_PX 0.75f
+
 // Room for every side road in the data plus the ones still fading out.
 #define SIDE_SLOTS (NAV_SIDE_ROADS_MAX * 2)
 
@@ -144,6 +150,8 @@ typedef struct
 
     lv_point_t route_px[ROUTE_SAMPLES]; // screen px
     uint16_t route_px_count;
+    lv_point_t route_draw[ROUTE_SAMPLES]; // route_px simplified for drawing
+    uint16_t route_draw_count;
 
     side_view_t sides[SIDE_SLOTS];
 
@@ -173,21 +181,29 @@ static lv_point_t units_to_px(fpoint_t p)
 }
 
 // ---- Small drawing helpers -------------------------------------------------
-static void draw_line(lv_layer_t *layer, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
-                      int32_t width, lv_color_t color, lv_opa_t opa)
+// Round ends are drawn by LVGL as extra circles, which cost more than the line
+// itself, so callers only ask for the ones that are actually visible.
+static void draw_line_ends(lv_layer_t *layer, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
+                           int32_t width, lv_color_t color, lv_opa_t opa, bool round_start, bool round_end)
 {
     lv_draw_line_dsc_t dsc;
     lv_draw_line_dsc_init(&dsc);
     dsc.color = color;
     dsc.width = width;
     dsc.opa = opa;
-    dsc.round_start = 1;
-    dsc.round_end = 1;
+    dsc.round_start = round_start;
+    dsc.round_end = round_end;
     dsc.p1.x = off_x + x1;
     dsc.p1.y = off_y + y1;
     dsc.p2.x = off_x + x2;
     dsc.p2.y = off_y + y2;
     lv_draw_line(layer, &dsc);
+}
+
+static void draw_line(lv_layer_t *layer, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
+                      int32_t width, lv_color_t color, lv_opa_t opa)
+{
+    draw_line_ends(layer, x1, y1, x2, y2, width, color, opa, true, true);
 }
 
 static void draw_tri(lv_layer_t *layer, int32_t x1, int32_t y1, int32_t x2, int32_t y2,
@@ -236,29 +252,38 @@ static void draw_side_roads(lv_layer_t *layer)
         lv_point_t b = side->to_px;
 
         // Fade by blending toward the background colour. The pieces are
-        // opaque with round ends, so neighbours overlap instead of leaving
-        // anti-aliased seams between them.
+        // opaque and each runs a little into the next one, so the next
+        // piece covers its anti-aliased end and no seam shows. No round ends:
+        // the start hides under the route and the far end has faded out.
+        float len = hypotf((float)(b.x - a.x), (float)(b.y - a.y));
+        float overlap = len > 0.0f ? SIDE_PIECE_OVERLAP_PX / len : 0.0f;
         for (uint8_t k = 0; k < SIDE_FADE_STEPS; k++)
         {
             float t0 = (float)k / SIDE_FADE_STEPS;
             float t1 = (float)(k + 1) / SIDE_FADE_STEPS;
+            if (k + 1 < SIDE_FADE_STEPS)
+            {
+                t1 += overlap;
+            }
             float strength = side->opa * (1.0f - t0 * 0.9f);
             lv_color_t color = lv_color_mix(COLOR_SIDE, COLOR_BG, (uint8_t)(strength * 255.0f));
-            draw_line(layer,
-                      a.x + (int32_t)lroundf((b.x - a.x) * t0), a.y + (int32_t)lroundf((b.y - a.y) * t0),
-                      a.x + (int32_t)lroundf((b.x - a.x) * t1), a.y + (int32_t)lroundf((b.y - a.y) * t1),
-                      SIDE_WIDTH, color, LV_OPA_COVER);
+            draw_line_ends(layer,
+                           a.x + (int32_t)lroundf((b.x - a.x) * t0), a.y + (int32_t)lroundf((b.y - a.y) * t0),
+                           a.x + (int32_t)lroundf((b.x - a.x) * t1), a.y + (int32_t)lroundf((b.y - a.y) * t1),
+                           SIDE_WIDTH, color, LV_OPA_COVER, false, false);
         }
     }
 }
 
 static void draw_route(lv_layer_t *layer)
 {
-    for (uint16_t i = 1; i < view.route_px_count; i++)
+    // One round cap per joint is enough: each segment's round end also
+    // covers the start of the next one.
+    for (uint16_t i = 1; i < view.route_draw_count; i++)
     {
-        draw_line(layer, view.route_px[i - 1].x, view.route_px[i - 1].y,
-                  view.route_px[i].x, view.route_px[i].y,
-                  ROUTE_WIDTH, lv_color_white(), LV_OPA_COVER);
+        draw_line_ends(layer, view.route_draw[i - 1].x, view.route_draw[i - 1].y,
+                       view.route_draw[i].x, view.route_draw[i].y,
+                       ROUTE_WIDTH, lv_color_white(), LV_OPA_COVER, i == 1, true);
     }
 }
 
@@ -343,10 +368,10 @@ static void draw_maneuver_icon(lv_layer_t *layer)
 
     for (uint8_t i = 1; i < shape->path_count; i++)
     {
-        draw_line(layer,
-                  ICON_X_AT(shape->path[i - 1].x), ICON_Y_AT(shape->path[i - 1].y),
-                  ICON_X_AT(shape->path[i].x), ICON_Y_AT(shape->path[i].y),
-                  ICON_STROKE, lv_color_white(), LV_OPA_COVER);
+        draw_line_ends(layer,
+                       ICON_X_AT(shape->path[i - 1].x), ICON_Y_AT(shape->path[i - 1].y),
+                       ICON_X_AT(shape->path[i].x), ICON_Y_AT(shape->path[i].y),
+                       ICON_STROKE, lv_color_white(), LV_OPA_COVER, i == 1, true);
     }
     draw_tri(layer,
              ICON_X_AT(shape->head[0].x), ICON_Y_AT(shape->head[0].y),
@@ -476,6 +501,78 @@ static bool resample_route(const nav_data_t *nav, fpoint_t *out)
     return true;
 }
 
+// Distance from p to the line through a and b, in px.
+static float line_distance(lv_point_t p, lv_point_t a, lv_point_t b)
+{
+    float dx = (float)(b.x - a.x);
+    float dy = (float)(b.y - a.y);
+    float len = hypotf(dx, dy);
+    if (len == 0.0f)
+    {
+        return hypotf((float)(p.x - a.x), (float)(p.y - a.y));
+    }
+    return fabsf(dx * (float)(a.y - p.y) - dy * (float)(a.x - p.x)) / len;
+}
+
+// Douglas-Peucker on route_px into route_draw: keeps the endpoints and every
+// sample that sits more than ROUTE_SIMPLIFY_PX off the simplified line.
+static void simplify_route(void)
+{
+    uint16_t n = view.route_px_count;
+    if (n < 3)
+    {
+        memcpy(view.route_draw, view.route_px, n * sizeof(view.route_px[0]));
+        view.route_draw_count = n;
+        return;
+    }
+
+    bool keep[ROUTE_SAMPLES] = {false};
+    uint16_t stack_from[ROUTE_SAMPLES];
+    uint16_t stack_to[ROUTE_SAMPLES];
+    uint16_t sp = 0;
+    keep[0] = keep[n - 1] = true;
+    stack_from[sp] = 0;
+    stack_to[sp] = n - 1;
+    sp++;
+    while (sp > 0)
+    {
+        sp--;
+        uint16_t from = stack_from[sp];
+        uint16_t to = stack_to[sp];
+        float worst = 0.0f;
+        uint16_t worst_i = 0;
+        for (uint16_t i = from + 1; i < to; i++)
+        {
+            float d = line_distance(view.route_px[i], view.route_px[from], view.route_px[to]);
+            if (d > worst)
+            {
+                worst = d;
+                worst_i = i;
+            }
+        }
+        if (worst > ROUTE_SIMPLIFY_PX)
+        {
+            keep[worst_i] = true;
+            stack_from[sp] = from;
+            stack_to[sp] = worst_i;
+            sp++;
+            stack_from[sp] = worst_i;
+            stack_to[sp] = to;
+            sp++;
+        }
+    }
+
+    uint16_t m = 0;
+    for (uint16_t i = 0; i < n; i++)
+    {
+        if (keep[i])
+        {
+            view.route_draw[m++] = view.route_px[i];
+        }
+    }
+    view.route_draw_count = m;
+}
+
 // Schematic units -> screen px. Returns true if any drawn pixel position
 // changed, so a sub-pixel glide does not trigger a redraw.
 static bool rebuild_route_px(void)
@@ -488,6 +585,10 @@ static bool rebuild_route_px(void)
         lv_point_t px = units_to_px(view.route_shown[i]);
         changed |= px.x != view.route_px[i].x || px.y != view.route_px[i].y;
         view.route_px[i] = px;
+    }
+    if (changed)
+    {
+        simplify_route();
     }
     return changed;
 }
