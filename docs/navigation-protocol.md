@@ -14,7 +14,7 @@ sejenisnya), lalu mengirim hasilnya ke ESP32-S3 lewat BLE dalam bentuk
 string terstruktur:
 
 ```
-NAV:bearing,jarak_ke_belok,tipe_belok,jarak_total,speed,titik_garis[]
+NAV:bearing,jarak_ke_belok,tipe_belok,jarak_total,speed,batas_speed,titik_garis[]
 ```
 
 Rincian field:
@@ -26,6 +26,7 @@ Rincian field:
 | `tipe_belok`    | enum/int      | -        | Jenis maneuver berikutnya: lurus / belok kiri / belok kanan / putar balik   |
 | `jarak_total`   | float         | meter    | Sisa jarak untuk keseluruhan rute (bukan cuma sampai belokan berikutnya)    |
 | `speed`         | float         | km/h     | Kecepatan saat ini                                                          |
+| `batas_speed`   | int           | km/h     | Batas kecepatan di ruas jalan saat ini, `0` = tidak diketahui (rambu disembunyikan) |
 | `titik_garis[]` | array of x,y  | meter    | Titik-titik garis skematik jalan (lihat bagian 2)                          |
 
 Payload ini adalah **rencana desain**, bukan implementasi aktif — koneksi
@@ -116,6 +117,7 @@ typedef struct {
     nav_maneuver_t maneuver;               // STRAIGHT / TURN_LEFT / TURN_RIGHT / U_TURN
     float total_distance_m;                // sisa jarak keseluruhan rute
     float speed_kmh;                       // kecepatan saat ini
+    uint16_t speed_limit_kmh;              // batas kecepatan ruas ini, 0 = tidak diketahui
     nav_point_t schematic_points[8];       // titik garis skematik, lokal, heading-up
     uint8_t schematic_point_count;         // jumlah titik yang valid di atas
     bool ble_connected;                    // placeholder, selalu false di mode dummy
@@ -129,6 +131,47 @@ parsing BLE `NAV:` payload, atau pembacaan sensor langsung — tinggal
 mengisi `nav_data_t` yang sama lewat fungsi `nav_sim_get_data()`-nya
 sendiri (atau fungsi pengganti dengan nama lain), tanpa mengubah satu pun
 baris kode di layer UI.
+
+## 6. Layar Navigasi (`screens/ui_nav_display.c`)
+
+Layar default sekarang adalah tampilan turn-by-turn untuk layar bulat
+240x240, seluruhnya digambar lewat draw callback LVGL (bukan gambar/bitmap)
+dan hanya membaca `nav_data_t`:
+
+- **Garis jalan** (`schematic_points`): putih tebal, heading-up, rider selalu
+  di panah tengah-bawah. Rider berada di titik asal (0,0) dan harus terletak
+  di garis jalan. Skala 4 px per satuan; titik terakhir sebaiknya jauh di
+  luar layar supaya garis tidak terlihat berhenti di tengah.
+- **Panel bawah berbentuk kubah** (lingkaran besar berpusat di bawah layar):
+  berisi ikon maneuver (lurus / kiri / kanan / putar balik) dan
+  `distance_to_turn_m`. Jarak dibulatkan per 10 m (>= 100 m) atau 5 m
+  (< 100 m), dan ditampilkan dalam km dengan satu desimal mulai ~1 km.
+- **Rambu batas kecepatan**: muncul hanya kalau `speed_limit_kmh > 0`.
+- **Busur progres** di tepi bawah: terisi dari kiri ke kanan dalam 500 m
+  terakhir sebelum belokan (`PROGRESS_RANGE_M`), kosong kalau masih jauh.
+
+Gerakan dibuat halus di sisi UI, jadi data boleh datang patah-patah
+(mis. BLE 1x per detik):
+
+- `ui_nav_display_set()` hanya menyimpan target. Timer LVGL 20 ms
+  menggerakkan garis jalan dan busur progres ke target dengan easing.
+  `main.cpp` memanggilnya tiap `loop()` lewat `ui_update_nav_display()`.
+- Setiap jalan diubah menjadi 35 titik berjarak sama (2 satuan), dihitung
+  dari titik jalan yang paling dekat dengan rider: 4 di belakang panah, sisanya
+  di depan. Titik ke-i selalu berarti "posisi yang sama relatif terhadap
+  rider", jadi pergantian maneuver menjadi morph mulus dari jalan lama ke
+  jalan baru, bukan digambar ulang. Hasilnya lalu dihaluskan (Chaikin).
+- Render LVGL memakai mode parsial dan jam dari `millis()`: hanya area yang
+  berubah yang digambar ulang dan dikirim ke layar.
+- Di mode dummy, rider "dikendarai" di sepanjang bentuk jalan: posisi maju
+  sampai persimpangan seiring `distance_to_turn_m` turun ke 0, lalu terus
+  melewati belokan (~1,4 detik, putar balik ~2,4 detik) dengan arah hadap
+  mengikuti jalan. Karena tampilannya heading-up, jalan ikut berputar di
+  sekitar panah seperti saat benar-benar berbelok, lalu leg berikutnya
+  menyambung dari situ.
+
+Layar debug lama (lat/lon, kompas X/Y/Z, jarum heading) masih ada: ubah
+`UI_START_DEBUG_SCREEN` di `src/ui_init.cpp` menjadi `1` untuk memakainya.
 
 ### Hal yang belum diimplementasikan (di luar cakupan dokumen ini)
 
