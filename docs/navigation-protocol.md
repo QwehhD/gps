@@ -14,7 +14,7 @@ sejenisnya), lalu mengirim hasilnya ke ESP32-S3 lewat BLE dalam bentuk
 string terstruktur:
 
 ```
-NAV:bearing,jarak_ke_belok,tipe_belok,jarak_total,speed,titik_garis[]
+NAV:bearing,jarak_ke_belok,tipe_belok,jarak_total,speed,batas_speed,titik_garis[]
 ```
 
 Rincian field:
@@ -26,6 +26,7 @@ Rincian field:
 | `tipe_belok`    | enum/int      | -        | Jenis maneuver berikutnya: lurus / belok kiri / belok kanan / putar balik   |
 | `jarak_total`   | float         | meter    | Sisa jarak untuk keseluruhan rute (bukan cuma sampai belokan berikutnya)    |
 | `speed`         | float         | km/h     | Kecepatan saat ini                                                          |
+| `batas_speed`   | int           | km/h     | Batas kecepatan di ruas jalan saat ini, `0` = tidak diketahui (rambu disembunyikan) |
 | `titik_garis[]` | array of x,y  | meter    | Titik-titik garis skematik jalan (lihat bagian 2)                          |
 
 Payload ini adalah **rencana desain**, bukan implementasi aktif — koneksi
@@ -116,6 +117,7 @@ typedef struct {
     nav_maneuver_t maneuver;               // STRAIGHT / TURN_LEFT / TURN_RIGHT / U_TURN
     float total_distance_m;                // sisa jarak keseluruhan rute
     float speed_kmh;                       // kecepatan saat ini
+    uint16_t speed_limit_kmh;              // batas kecepatan ruas ini, 0 = tidak diketahui
     nav_point_t schematic_points[8];       // titik garis skematik, lokal, heading-up
     uint8_t schematic_point_count;         // jumlah titik yang valid di atas
     bool ble_connected;                    // placeholder, selalu false di mode dummy
@@ -129,6 +131,25 @@ parsing BLE `NAV:` payload, atau pembacaan sensor langsung — tinggal
 mengisi `nav_data_t` yang sama lewat fungsi `nav_sim_get_data()`-nya
 sendiri (atau fungsi pengganti dengan nama lain), tanpa mengubah satu pun
 baris kode di layer UI.
+
+## 6. Layar Navigasi (`screens/ui_nav_display.c`)
+
+Layar default sekarang adalah tampilan turn-by-turn untuk layar bulat
+240x240, seluruhnya digambar lewat draw callback LVGL (bukan gambar/bitmap)
+dan hanya membaca `nav_data_t`:
+
+- **Garis jalan** (`schematic_points`): putih tebal, heading-up, rider selalu
+  di panah tengah-bawah. Skala 4 px per satuan; titik terakhir sebaiknya
+  jauh di luar layar supaya garis tidak terlihat berhenti di tengah.
+- **Panel bawah**: ikon maneuver (lurus / kiri / kanan / putar balik) dan
+  `distance_to_turn_m`. Dibulatkan per 10 m (>= 100 m) atau 5 m (< 100 m),
+  dan ditampilkan dalam km dengan satu desimal mulai ~1 km.
+- **Rambu batas kecepatan**: muncul hanya kalau `speed_limit_kmh > 0`.
+- **Busur progres** di tepi bawah: terisi dari kiri ke kanan dalam 500 m
+  terakhir sebelum belokan (`PROGRESS_RANGE_M`), kosong kalau masih jauh.
+
+Layar debug lama (lat/lon, kompas X/Y/Z, jarum heading) masih ada: ubah
+`UI_START_DEBUG_SCREEN` di `src/ui_init.cpp` menjadi `1` untuk memakainya.
 
 ### Hal yang belum diimplementasikan (di luar cakupan dokumen ini)
 

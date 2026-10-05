@@ -15,18 +15,25 @@ namespace
     constexpr float DISTANCE_START_M = 500.0f;
     constexpr float MIN_DISTANCE_SPEED_MS = 5.0f;   // keeps the countdown moving even at 0 km/h
 
+    // The preview fills the whole round screen (~4 px per unit, rider at the
+    // arrow tip), so every road runs past the screen edge — the last point
+    // is deliberately far out so the line never visibly ends mid-screen.
     const nav_point_t PRESET_STRAIGHT[] = {
-        {0, 0}, {0, 10}, {0, 20}, {0, 30},
+        {0, 0}, {0, 10}, {0, 20}, {0, 34},
     };
     const nav_point_t PRESET_LEFT[] = {
-        {0, 0}, {0, 10}, {0, 18}, {-8, 24}, {-18, 25},
+        {0, 0}, {0, 9}, {-1, 14}, {-5, 18}, {-12, 19}, {-34, 19},
     };
     const nav_point_t PRESET_RIGHT[] = {
-        {0, 0}, {0, 10}, {0, 18}, {8, 24}, {18, 25},
+        {0, 0}, {0, 9}, {1, 14}, {5, 18}, {12, 19}, {34, 19},
     };
     const nav_point_t PRESET_UTURN[] = {
-        {0, 0}, {0, 12}, {6, 16}, {10, 10}, {8, 2}, {2, -4},
+        {0, 0}, {0, 12}, {2, 18}, {8, 21}, {14, 18}, {16, 12}, {16, 0}, {16, -12},
     };
+
+    // Posted limits cycled per leg, so the sign changes while testing.
+    const uint16_t SPEED_LIMITS_KMH[] = {40, 50, 60, 70};
+    uint8_t g_limit_index = 0;
 
     struct PresetInfo
     {
@@ -66,6 +73,8 @@ namespace
         g_nav.maneuver = static_cast<nav_maneuver_t>((g_nav.maneuver + 1) % NAV_MANEUVER_COUNT);
         g_nav.distance_to_turn_m = DISTANCE_START_M;
         g_nav.total_distance_m = random_range(300.0f, 1500.0f);
+        g_limit_index = (g_limit_index + 1) % (sizeof(SPEED_LIMITS_KMH) / sizeof(SPEED_LIMITS_KMH[0]));
+        g_nav.speed_limit_kmh = SPEED_LIMITS_KMH[g_limit_index];
         apply_preset(g_nav.maneuver);
     }
 
@@ -78,6 +87,8 @@ void nav_sim_init(void)
     g_nav.distance_to_turn_m = DISTANCE_START_M;
     g_nav.maneuver = NAV_MANEUVER_STRAIGHT;
     g_nav.total_distance_m = random_range(300.0f, 1500.0f);
+    g_limit_index = 0;
+    g_nav.speed_limit_kmh = SPEED_LIMITS_KMH[g_limit_index];
     g_nav.ble_connected = false;
     apply_preset(g_nav.maneuver);
 
