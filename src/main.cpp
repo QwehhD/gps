@@ -292,5 +292,7 @@ void loop()
   }
 #endif // USE_DUMMY_DATA
 
-  delay(5);
+  // Short sleep: LVGL's timers only run when loop() comes back here, so a
+  // longer delay would make the display refresh drift by up to that much.
+  delay(1);
 }
