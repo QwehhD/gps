@@ -42,8 +42,9 @@ namespace
 
     struct SideRoad
     {
-        float x1, y1, x2, y2; // world segment, (x1,y1) on the route
-        float s;              // road distance of the spot where it meets the route
+        float x[NAV_SIDE_ROAD_MAX_POINTS]; // world polyline, point 0 on the route
+        float y[NAV_SIDE_ROAD_MAX_POINTS];
+        float s; // road distance of the spot where it meets the route
     };
 
     struct Junction
@@ -96,13 +97,28 @@ namespace
         g_road[g_road_count++] = {x, y, s};
     }
 
+    // Side roads are short polylines. About half of them bend gently (up to
+    // ~50 degrees spread over their length) so the view isn't all straight
+    // stubs.
     void add_side_road(float x, float y, float angle, float length, float s)
     {
         if (g_side_count >= MAX_SIDE_ROADS)
         {
             return;
         }
-        g_side[g_side_count++] = {x, y, x + cosf(angle) * length, y + sinf(angle) * length, s};
+        constexpr int segments = NAV_SIDE_ROAD_MAX_POINTS - 1;
+        float bend = chance(0.5f) ? random_range(-50.0f, 50.0f) * kDegToRad : 0.0f;
+
+        SideRoad &road = g_side[g_side_count++];
+        road.s = s;
+        road.x[0] = x;
+        road.y[0] = y;
+        for (int k = 0; k < segments; k++)
+        {
+            float heading = angle + bend * (k + 0.5f) / segments;
+            road.x[k + 1] = road.x[k] + cosf(heading) * length / segments;
+            road.y[k + 1] = road.y[k] + sinf(heading) * length / segments;
+        }
     }
 
     // Branches at a junction: any of straight-on / left / right that the
@@ -321,8 +337,11 @@ namespace
         {
             if (g_side[i].s >= s_from && g_side[i].s <= s_to)
             {
-                g_nav.side_roads[m].from = to_local(g_side[i].x1, g_side[i].y1);
-                g_nav.side_roads[m].to = to_local(g_side[i].x2, g_side[i].y2);
+                for (uint8_t k = 0; k < NAV_SIDE_ROAD_MAX_POINTS; k++)
+                {
+                    g_nav.side_roads[m].points[k] = to_local(g_side[i].x[k], g_side[i].y[k]);
+                }
+                g_nav.side_roads[m].point_count = NAV_SIDE_ROAD_MAX_POINTS;
                 m++;
             }
         }

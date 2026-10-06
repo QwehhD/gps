@@ -49,13 +49,16 @@ extern "C"
 // ahead), so it usually holds several upcoming turns, not just the next one.
 #define NAV_SCHEMATIC_MAX_POINTS 32
 
+#define NAV_SIDE_ROAD_MAX_POINTS 4
+
     // A road branching off the route (the other arms of a junction), as a
-    // straight segment in the same local coordinates: `from` sits on the
-    // route, `to` is the far end (the UI fades the road out toward it).
+    // short polyline in the same local coordinates, so it can bend:
+    // points[0] sits on the route, the last point is the far end (the UI
+    // fades the road out toward it).
     typedef struct
     {
-        nav_point_t from;
-        nav_point_t to;
+        nav_point_t points[NAV_SIDE_ROAD_MAX_POINTS];
+        uint8_t point_count;
     } nav_side_road_t;
 
 #define NAV_SIDE_ROADS_MAX 8
