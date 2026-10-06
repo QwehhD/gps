@@ -157,9 +157,10 @@ dan hanya membaca `nav_data_t`:
   di panah tengah-bawah. Rider berada di titik asal (0,0) dan harus terletak
   di garis rute. Skala 4 px per satuan; titik terakhir sebaiknya jauh di
   luar layar supaya garis tidak terlihat berhenti di tengah.
-- **Jalan samping** (`side_roads`): abu-abu kebiruan, lebih tipis dari
-  rute, memudar dari rute ke ujung jauhnya. Muncul dan hilang dengan fade
-  ~200 ms saat masuk/keluar jendela data.
+- **Jalan samping** (`side_roads`): digambar sebagai sepasang garis tepi
+  tipis abu-abu kebiruan (2 px, berjarak 7 px, kira-kira selebar rute),
+  memudar dari rute ke ujung jauhnya. Muncul dan hilang dengan fade ~200 ms
+  saat masuk/keluar jendela data.
 - **Panah rider 3D**: sisi kiri terang dan sisi kanan teduh (cahaya dari
   kiri), sisi bawah diberi ketebalan yang lebih gelap, plus bayangan lembut.
 - **Panel bawah berbentuk kubah** (lingkaran besar berpusat di bawah layar):
