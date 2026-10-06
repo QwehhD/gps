@@ -20,10 +20,11 @@ static lv_obj_t *label_unit = NULL;
 #define ROUTE_PX_PER_UNIT 4
 #define ROUTE_WIDTH 8
 
-// Side roads: thinner, grey-blue, fading out away from the route.
-#define SIDE_WIDTH 5
+// Side roads: drawn as a road outline (two thin parallel edge lines, about as
+// wide overall as the route) in grey-blue, fading out away from the route.
+#define SIDE_EDGE_WIDTH 2
+#define SIDE_HALF_GAP_PX 3.5f // each edge sits this far from the road's centre line
 #define SIDE_FADE_STEPS 4
-#define SIDE_PIECE_OVERLAP_PX 2.0f
 
 // Rider arrow (chevron) sits just above the top of the bottom panel. It is
 // drawn as a raised 3D chevron: soft shadow, a darker extruded underside,
@@ -65,7 +66,7 @@ static lv_obj_t *label_unit = NULL;
 #define COLOR_BG lv_color_hex(0x0C0C20)
 #define COLOR_PANEL lv_color_hex(0x2C2C31)
 #define COLOR_ARC_BG lv_color_hex(0x5A5A62)
-#define COLOR_SIDE lv_color_hex(0x7C8296)
+#define COLOR_SIDE lv_color_hex(0x9AA1B5)
 #define COLOR_ARROW_LIT lv_color_hex(0xFFFFFF)
 #define COLOR_ARROW_SHADED lv_color_hex(0xC2C7D2)
 #define COLOR_ARROW_EDGE_LIT lv_color_hex(0x8E94A3)
@@ -248,29 +249,40 @@ static void draw_side_roads(lv_layer_t *layer)
         {
             continue;
         }
-        lv_point_t a = side->from_px;
-        lv_point_t b = side->to_px;
-
-        // Fade by blending toward the background colour. The pieces are
-        // opaque and each runs a little into the next one, so the next
-        // piece covers its anti-aliased end and no seam shows. No round ends:
-        // the start hides under the route and the far end has faded out.
-        float len = hypotf((float)(b.x - a.x), (float)(b.y - a.y));
-        float overlap = len > 0.0f ? SIDE_PIECE_OVERLAP_PX / len : 0.0f;
-        for (uint8_t k = 0; k < SIDE_FADE_STEPS; k++)
+        float ax = (float)side->from_px.x;
+        float ay = (float)side->from_px.y;
+        float dx = (float)side->to_px.x - ax;
+        float dy = (float)side->to_px.y - ay;
+        float len = hypotf(dx, dy);
+        if (len < 1.0f)
         {
-            float t0 = (float)k / SIDE_FADE_STEPS;
-            float t1 = (float)(k + 1) / SIDE_FADE_STEPS;
-            if (k + 1 < SIDE_FADE_STEPS)
+            continue;
+        }
+        // Offset from the centre line to one edge (perpendicular to the road).
+        float nx = -dy / len * SIDE_HALF_GAP_PX;
+        float ny = dx / len * SIDE_HALF_GAP_PX;
+
+        // Fade by blending toward the background colour, as nested lines that
+        // all start at the route: the full edge in the dimmest shade, then
+        // shorter and brighter ones on top. Every piece shares the same start
+        // pixel, so the thin edge stays straight instead of kinking where
+        // separately rounded pieces would meet. No round ends: the start
+        // hides under the route and the far end has faded out.
+        for (int edge = -1; edge <= 1; edge += 2)
+        {
+            float ex = ax + nx * edge;
+            float ey = ay + ny * edge;
+            int32_t sx = (int32_t)lroundf(ex);
+            int32_t sy = (int32_t)lroundf(ey);
+            for (uint8_t k = 0; k < SIDE_FADE_STEPS; k++)
             {
-                t1 += overlap;
+                float reach = (float)(SIDE_FADE_STEPS - k) / SIDE_FADE_STEPS; // 1, 0.75, 0.5, 0.25
+                float strength = side->opa * (1.0f - 0.9f * (reach - 1.0f / SIDE_FADE_STEPS));
+                lv_color_t color = lv_color_mix(COLOR_SIDE, COLOR_BG, (uint8_t)(strength * 255.0f));
+                draw_line_ends(layer, sx, sy,
+                               (int32_t)lroundf(ex + dx * reach), (int32_t)lroundf(ey + dy * reach),
+                               SIDE_EDGE_WIDTH, color, LV_OPA_COVER, false, false);
             }
-            float strength = side->opa * (1.0f - t0 * 0.9f);
-            lv_color_t color = lv_color_mix(COLOR_SIDE, COLOR_BG, (uint8_t)(strength * 255.0f));
-            draw_line_ends(layer,
-                           a.x + (int32_t)lroundf((b.x - a.x) * t0), a.y + (int32_t)lroundf((b.y - a.y) * t0),
-                           a.x + (int32_t)lroundf((b.x - a.x) * t1), a.y + (int32_t)lroundf((b.y - a.y) * t1),
-                           SIDE_WIDTH, color, LV_OPA_COVER, false, false);
         }
     }
 }
