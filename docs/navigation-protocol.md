@@ -27,7 +27,7 @@ Rincian field:
 | `jarak_total`   | float         | meter    | Sisa jarak untuk keseluruhan rute (bukan cuma sampai belokan berikutnya)    |
 | `speed`         | float         | km/h     | Kecepatan saat ini                                                          |
 | `titik_garis[]` | array of x,y  | satuan   | Titik-titik garis rute di sekitar rider, maks. 32 (lihat bagian 2)          |
-| `jalan_samping[]` | array of segmen x,y→x,y | satuan | Cabang jalan di sekitar rute, maks. 8 (lihat bagian 3)       |
+| `jalan_samping[]` | array of polyline (maks. 4 titik x,y) | satuan | Cabang jalan di sekitar rute, maks. 8 (lihat bagian 3) |
 
 Payload ini adalah **rencana desain**, bukan implementasi aktif — koneksi
 BLE yang sudah berjalan di `src/main.cpp` saat ini masih memakai format
@@ -69,10 +69,11 @@ Beberapa aplikasi navigasi menampilkan bukan cuma jalur yang akan dilalui,
 tapi juga cabang-cabang jalan lain di persimpangan (junction view) supaya
 rider bisa mengenali persimpangan yang benar sebelum sampai di sana. Layar
 sudah mendukungnya lewat `side_roads` (`jalan_samping[]`): tiap cabang
-berupa satu segmen lurus dalam koordinat yang sama dengan garis rute,
-dengan `from` di rute dan `to` di ujung jauh (digambar memudar ke arah
-`to`). Saat ini hanya data dummy yang mengisinya; untuk data asli, sumber
-datanya masih perlu dipilih:
+berupa polyline pendek (maks. 4 titik, jadi bisa bengkok) dalam koordinat
+yang sama dengan garis rute, dengan titik pertama di rute dan titik
+terakhir di ujung jauh (digambar memudar ke arah ujung itu). Saat ini hanya
+data dummy yang mengisinya; untuk data asli, sumber datanya masih perlu
+dipilih:
 
 - **OpenRouteService** (routing API yang direncanakan dipakai): per step,
   cuma menyediakan `bearing_before` dan `bearing_after` — yaitu bearing
@@ -133,7 +134,7 @@ typedef struct {
     float speed_kmh;                       // kecepatan saat ini
     nav_point_t schematic_points[32];      // garis rute, lokal, heading-up, rider di (0,0)
     uint8_t schematic_point_count;         // jumlah titik yang valid di atas
-    nav_side_road_t side_roads[8];         // cabang jalan: segmen from (di rute) -> to
+    nav_side_road_t side_roads[8];         // cabang jalan: polyline maks. 4 titik, titik 0 di rute
     uint8_t side_road_count;               // jumlah cabang yang valid di atas
     bool ble_connected;                    // placeholder, selalu false di mode dummy
 } nav_data_t;
@@ -153,14 +154,20 @@ Layar default sekarang adalah tampilan turn-by-turn untuk layar bulat
 240x240, seluruhnya digambar lewat draw callback LVGL (bukan gambar/bitmap)
 dan hanya membaca `nav_data_t`:
 
-- **Garis rute** (`schematic_points`): putih tebal, heading-up, rider selalu
-  di panah tengah-bawah. Rider berada di titik asal (0,0) dan harus terletak
-  di garis rute. Skala 4 px per satuan; titik terakhir sebaiknya jauh di
-  luar layar supaya garis tidak terlihat berhenti di tengah.
+- **Garis rute** (`schematic_points`): putih tebal dengan tepi abu tipis di
+  kedua sisinya, heading-up, rider selalu di panah tengah-bawah. Rider
+  berada di titik asal (0,0) dan harus terletak di garis rute. Skala 4 px
+  per satuan; titik terakhir sebaiknya jauh di luar layar supaya garis
+  tidak terlihat berhenti di tengah.
 - **Jalan samping** (`side_roads`): digambar sebagai sepasang garis tepi
-  tipis abu-abu kebiruan (2 px, berjarak 7 px, kira-kira selebar rute),
-  memudar dari rute ke ujung jauhnya. Muncul dan hilang dengan fade ~200 ms
-  saat masuk/keluar jendela data.
+  tipis abu-abu kebiruan (2 px, berjarak 8 px) yang mengikuti bengkoknya
+  polyline dan memudar satu tingkat per segmen dari rute ke ujung jauhnya.
+  Warnanya sama dengan tepi rute, dan tepi rute dibuka di tempat jalan
+  samping bertemu (mulut persimpangan), jadi dua garis jalan samping
+  menyambung ke tepi rute seperti satu jaringan jalan. Pangkalnya ditarik
+  4,5 px masuk ke bawah rute, supaya tetap menyatu walaupun sudut rute di
+  persimpangan dipotong. Muncul dan hilang dengan fade ~200 ms saat
+  masuk/keluar jendela data.
 - **Panah rider 3D**: sisi kiri terang dan sisi kanan teduh (cahaya dari
   kiri), sisi bawah diberi ketebalan yang lebih gelap, plus bayangan lembut.
 - **Panel bawah berbentuk kubah** (lingkaran besar berpusat di bawah layar):
@@ -187,38 +194,58 @@ Gerakan dibuat halus di sisi UI, jadi data boleh datang patah-patah
 - Jalan samping dipasangkan dengan yang tampil sebelumnya (titik awal
   berdekatan dan arahnya mirip), jadi ikut bergeser mulus; yang tidak punya
   pasangan muncul dengan fade-in, yang hilang dari data memudar keluar.
-- Render LVGL memakai mode parsial dan jam dari `millis()`: hanya area yang
-  posisi pikselnya benar-benar berubah yang digambar ulang dan dikirim ke
-  layar.
+- Karena data dummy berupa rute menerus, belokan berikutnya sudah terlihat
+  sebelum tiba, dan saat rider melewati belokan tampilan ikut berputar di
+  sekitar panah (heading-up) tanpa ada garis yang diganti.
 
 ### Performa di ESP32-S3 (diukur di board)
 
-Frame yang bergerak butuh ±16–19 ms. Angka ini bisa dilihat sendiri dengan
-mengubah `LV_PORT_PERF_LOG` di `src/lv_port_disp.cpp` menjadi `1`: FPS,
-jeda terlama antar-frame, dan waktu render dicetak ke serial tiap 2 detik.
-Yang membuatnya cukup cepat untuk 40 fps stabil:
+Frame yang bergerak butuh ±10–17 ms, jadi refresh tiap 25 ms memberi 40 fps
+stabil. Angka ini bisa dilihat sendiri dengan mengubah `LV_PORT_PERF_LOG`
+di `src/lv_port_disp.cpp` menjadi `1`: FPS, jeda terlama antar-frame, dan
+waktu render dicetak ke serial tiap 2 detik. Hal-hal yang membuatnya cukup
+cepat, semuanya diukur:
 
-- **DMA lewat `esp_lcd` (ESP-IDF) dengan dua buffer 240x68**: LVGL
-  menggambar potongan berikutnya sementara potongan sebelumnya dikirim
-  lewat SPI. TFT_eSPI hanya dipakai di `setup()` untuk inisialisasi panel
-  dan teks pembuka; setelah itu perintah alamat dan piksel sama-sama lewat
-  `esp_lcd`. DMA milik TFT_eSPI sendiri sempat dicoba dan tidak bisa
-  dipakai di board ini: versi 2.5.43 crash di callback akhir transfernya
-  di ESP32-S3, dan setelah crash itu diakali, panel mengabaikan semua frame
-  karena tulisan register langsung TFT_eSPI bercampur dengan transfer DMA
-  driver IDF (layar tertahan di teks pembuka).
+- **Lapisan peta digambar sendiri** (`screens/ui_nav_raster.c`): latar,
+  jalan samping, tepi dan inti rute, serta mulut persimpangan ditulis
+  langsung ke buffer layer dengan rasterizer kecil (segmen anti-aliasing
+  berujung bulat, hanya mengunjungi piksel di sekitar garis, jarak dihitung
+  bertahap per piksel). Renderer garis LVGL makan ±0,1–0,3 ms per garis di
+  ESP32-S3, terlalu mahal untuk peta berisi puluhan garis; dengan
+  rasterizer ini seluruh peta ±4–8 ms. Layar LVGL dibuat transparan supaya
+  tidak ada yang digambar di bawah peta; kubah, busur, panah, ikon, dan
+  teks tetap digambar LVGL di atasnya.
+- **LVGL dikunci ke 9.6.0** di `platformio.ini`: 9.5 sekitar 3 ms lebih
+  lambat per frame, dan versi yang tidak dikunci sempat membuat build di
+  dua folder berbeda versi.
+- **Biaya LVGL sisanya adalah per tugas gambar dan per putaran render**,
+  bukan per piksel, karena LVGL menjalankan ulang seluruh draw callback
+  untuk tiap putaran. Karena itu:
+  - **Mode render DIRECT dengan satu buffer layar penuh** (format
+    RGB565_SWAPPED, jadi tidak perlu tukar byte): area apa pun dirender
+    dalam satu putaran, langsung di posisinya, dan beberapa area dalam satu
+    frame tidak saling menunggu transfer.
+  - **Panah 3D dan ikon belok di-cache** sebagai canvas (gambar) dan hanya
+    disalin tiap frame; ikon digambar ulang hanya saat maneuver berganti.
+  - **Bentuk di luar area yang sedang dirender dilewati** sebelum tugas
+    LVGL dibuat.
+- **Garis rute disederhanakan** (Douglas–Peucker, 0,75 px) sebelum
+  digambar, jadi lebih sedikit segmen yang saling tumpang di sambungan.
+- **Pengiriman lewat `spi_master` ESP-IDF, sepenuhnya di latar belakang**:
+  satu frame dikirim sebagai antrean transaksi (alamat, lalu potongan ≤64
+  baris dengan RAMWR / RAMWR_CONTINUE, karena satu transaksi DMA ESP32-S3
+  maksimal 32 KB). TFT_eSPI hanya dipakai di `setup()` untuk inisialisasi
+  panel dan teks pembuka. DMA TFT_eSPI tidak dipakai: versi 2.5.43 crash di
+  callback akhir transfernya di ESP32-S3, dan mencampur tulisan register
+  TFT_eSPI dengan DMA driver IDF membuat panel mengabaikan semua frame.
+  `esp_lcd` juga tidak dipakai: di IDF 4.4 ia hanya mengizinkan satu
+  transfer berjalan, jadi frame yang lebih besar dari satu transfer harus
+  ditunggu.
 - **Refresh tiap 25 ms**, sedikit di atas waktu render terburuk. Periode yang
   lebih pendek dari waktu render membuat jarak antar-frame berselang-seling
   satu/dua periode dan terasa patah-patah. `loop()` hanya tidur 1 ms supaya
   timer LVGL tidak bergeser.
-- **Garis rute disederhanakan** (Douglas–Peucker, 0,75 px) sebelum digambar,
-  dan ujung bulat hanya dipakai di tempat yang terlihat: LVGL menggambar
-  setiap ujung bulat sebagai lingkaran tersendiri yang lebih mahal dari
-  garisnya.
 - **`-O2`** menggantikan `-Os` bawaan framework (di `platformio.ini`).
-- Karena data dummy berupa rute menerus, belokan berikutnya sudah terlihat
-  sebelum tiba, dan saat rider melewati belokan tampilan ikut berputar di
-  sekitar panah (heading-up) tanpa ada garis yang diganti.
 
 Layar debug lama (lat/lon, kompas X/Y/Z, jarum heading) masih ada: ubah
 `UI_START_DEBUG_SCREEN` di `src/ui_init.cpp` menjadi `1` untuk memakainya.
