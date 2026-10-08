@@ -1,8 +1,9 @@
 # Butamap GPS — Dokumentasi Proyek & Persiapan Data Asli
 
-Status per 8 Oktober 2026: `main` (`25c28b3`, fase 1: format biner `'N'`,
-unit test host, mode loopback) ditambah fase 2 jalur data asli (penerima
-BLE dengan fragmentasi, state "tidak ada sinyal", pengirim uji di laptop).
+Status per 8 Oktober 2026: `main` (`9fb50aa`, fase 1 dan 2 jalur data asli:
+format biner `'N'`, fragmentasi BLE, penerima BLE, state "tidak ada sinyal",
+pengirim uji di laptop) ditambah kompas opsional (`ENABLE_COMPASS`) dan
+periode refresh 30 ms.
 
 Dokumen ini berdiri sendiri: ditulis supaya bisa dibaca tanpa membuka repo,
 sebagai bahan untuk merencanakan peralihan dari data simulasi ke data asli
@@ -34,20 +35,20 @@ lat/lon untuk app HP. Yang belum ada: app HP itu sendiri.
 | --- | --- |
 | Layar navigasi (rute, jalan samping, panah, panel jarak, busur progres) | Selesai, diuji di board |
 | Animasi halus (easing, rute menerus, belokan berputar mulus) | Selesai |
-| Performa render (±40 fps, rata-rata 10–17 ms per frame) | Selesai, diukur di board. Frame tunggal bisa 25–29 ms karena menunggu DMA frame sebelumnya (bagian 9) |
+| Performa render (refresh 30 ms → ±33 fps, rata-rata 12–13 ms per frame) | Selesai, diukur di board: frame terberat ≤ 25,3 ms, tidak ada frame yang melewati periode (bagian 9) |
 | Simulator data dummy (rute acak, jalan samping, belokan) | Selesai |
 | Kontrak data `nav_data_t` (antarmuka sumber data → UI) | Selesai |
 | Pilihan sumber data `NAV_SOURCE` (SIM / LOOPBACK / BLE) | Selesai, tanpa fallback runtime ke simulator (bagian 6) |
 | Format payload navigasi lewat BLE (pesan biner `'N'`) | Selesai: encoder/decoder defensif `src/nav_codec.c` (bagian 13.4) |
 | Fragmentasi BLE (frame `0xCE`, rakit ulang per nomor pesan) | Selesai: `src/nav_frag.c`, jalan dari write 20 B (MTU minimum) sampai 514 B (bagian 13.4) |
 | Unit test host (`pio test -e native`) | Selesai: 51 test (codec, fragmentasi, simulator lewat codec); juga lolos saat dijalankan manual dengan ASan/UBSan |
-| Mode loopback (simulator → encode → frame 20 B → rakit → decode → layar) | Selesai, diuji di board: 0 error, 40 fps, tampilan sama dengan SIM |
+| Mode loopback (simulator → encode → frame 20 B → rakit → decode → layar) | Selesai, diuji di board: 0 error, tampilan sama dengan SIM |
 | BLE server (Nordic UART Service, Bluedroid) | Jalan: frame navigasi + `GPS:lat,lon,speed` lama; diuji dari laptop di 514/182/20 B per write |
 | Pengisian `nav_data_t` dari data asli (`NAV_SOURCE_BLE`) | Selesai: task BLE → queue FreeRTOS panjang 1 → `loop()`; `ble_connected` diisi; paket hilang dihitung dari nomor urut |
 | State "tidak ada sinyal" (> 3 detik tanpa data valid / link putus) | Selesai: rute diredupkan, panel menampilkan ikon sinyal dicoret dan `--` |
 | Pengirim uji di laptop (`tools/ble_sender/`, Python + bleak) | Selesai: mode `--synthetic` dan `--latlon` (pipeline bagian 13.2), 28 test pytest |
 | App HP (routing, konversi koordinat, kirim BLE) | **Belum ada** — `tools/ble_sender/navgeo.py` adalah referensinya |
-| Kompas QMC5883L | Kode pembacaan hanya untuk `NAV_SOURCE_BLE`, belum dikalibrasi, belum dipakai layar navigasi. Di board saat ini sensornya **tidak merespons** (bagian 14) |
+| Kompas QMC5883L | **Belum terpasang** (board hanya ESP32-S3 + layar). Kode opsional lewat `-DENABLE_COMPASS=1` (bawaan 0): probe sekali saat boot, tidak di-poll kalau tidak merespons. Hanya dipakai layar debug lama (bagian 13.6) |
 | IMU (MPU6050) | Belum ada di hardware |
 
 ## 3. Hardware
@@ -57,7 +58,7 @@ lat/lon untuk app HP. Yang belum ada: app HP itu sendiri.
 | Board | ESP32-S3 DevKitC-1, chip ESP32-S3 (QFN56) rev 0.2, flash 16 MB (quad), PSRAM 8 MB embedded |
 | USB | Port USB-Serial/JTAG bawaan, muncul sebagai `/dev/ttyACM*` |
 | Layar | GC9A01, bulat, 240×240, SPI |
-| Kompas | QMC5883L, I2C alamat `0x0D` |
+| Kompas | Belum terpasang. Kode mendukung QMC5883L di I2C alamat `0x0D` (opsional, `ENABLE_COMPASS`) |
 | LED | NeoPixel di GPIO 48 (dimatikan saat boot) |
 
 Sambungan layar (SPI2/FSPI, 80 MHz):
@@ -72,7 +73,7 @@ Sambungan layar (SPI2/FSPI, 80 MHz):
 | BL / BLK | ke 3V3 (kode tidak mengatur backlight) |
 | VCC / GND | 3V3 / GND |
 
-Kompas: SDA = GPIO 2, SCL = GPIO 1, clock I2C 50 kHz.
+Kompas (kalau nanti dipasang): SDA = GPIO 2, SCL = GPIO 1, clock I2C 50 kHz.
 
 Catatan upload: setelah upload, board kadang tertahan di mode download
 (layar tetap di teks hijau pembuka atau hitam). Tekan tombol **RST** atau
@@ -92,12 +93,18 @@ cabut-colok USB. Port bisa berganti antara `ttyACM0` dan `ttyACM1`.
 - Kompilasi `-O2` (menggantikan `-Os` bawaan) karena render LVGL software.
 - Pemakaian memori (`NAV_SOURCE_SIM`): RAM 78% (±255 KB dari 320 KB;
   termasuk buffer layar penuh 115 KB), flash 43,7%. `NAV_SOURCE_BLE`: RAM
-  77,2%, flash 44,2%.
+  77,1%, flash ±44%.
 - Stack BLE: **Bluedroid** (library `BLEDevice` bawaan Arduino-ESP32 2.0.17;
-  NimBLE tidak aktif). Heap internal bebas saat runtime di `NAV_SOURCE_BLE`:
-  ±46,7 KB sebelum tersambung, ±42,8 KB saat tersambung dan menerima data,
-  minimum tercatat ±35 KB, blok terbesar ±32,7 KB. Task Bluedroid (BTC)
-  hanya punya stack 3 KB, jadi semua struct besar di jalur terima `static`.
+  NimBLE tidak aktif). Heap internal bebas saat runtime di `NAV_SOURCE_BLE`
+  tanpa kompas: ±45,4 KB saat tersambung dan menerima data, minimum tercatat
+  ±44 KB, blok terbesar ±36,9 KB. Dengan `ENABLE_COMPASS=1` driver I2C ikut
+  aktif dan memakai ±2,8 KB lagi. (Pengukuran fase 2 mendapat minimum ±35 KB
+  saat kode kompas lama masih mem-poll sensor yang tidak ada.) Task Bluedroid
+  (BTC) hanya punya stack 3 KB, jadi semua struct besar di jalur terima
+  `static`.
+- Pilihan saat build (bisa diubah di header-nya atau lewat `-D…` di
+  `build_flags`): `NAV_SOURCE` (`src/nav_source.h`), `ENABLE_COMPASS`
+  (`src/hw_config.h`, bawaan 0), `LV_PORT_PERF_LOG` (`src/lv_port_disp.cpp`).
 
 Build, upload, dan test:
 
@@ -120,16 +127,23 @@ env PLATFORMIO_BUILD_FLAGS="-DNAV_SOURCE=NAV_SOURCE_LOOPBACK" pio run -t upload 
 ```
 
 Log performa: ubah `LV_PORT_PERF_LOG` di `src/lv_port_disp.cpp` menjadi `1`,
-atau per build dengan `-DLV_PORT_PERF_LOG=1`; FPS, jeda terlama antar-frame,
-waktu render rata-rata **dan frame terberat**, serta piksel per frame
-dicetak ke serial tiap 2 detik.
+atau per build dengan `-DLV_PORT_PERF_LOG=1`. Tiap 2 detik dicetak ke serial:
+
+```
+[perf] 33.3 fps | longest gap 33.7 ms | frame avg 12.5 ms, max 24.3 ms (render only max 23.6, DMA wait max 5.9) | 0 over 30 ms | flush 0.3 ms | 46962 px/frame
+```
+
+"Frame" dihitung dari mulai render sampai frame diantrekan ke DMA, termasuk
+menunggu DMA frame sebelumnya; "render only" adalah frame tanpa tunggu itu;
+"over 30 ms" adalah jumlah frame yang lebih lama dari periode refresh.
 
 ## 5. Struktur kode
 
 | Berkas | Isi |
 | --- | --- |
-| `src/main.cpp` | `setup()`/`loop()`, BLE server (frame navigasi + `GPS:`), pembacaan QMC5883L (`NAV_SOURCE_BLE`), deteksi data basi, jalur loopback |
+| `src/main.cpp` | `setup()`/`loop()`, BLE server (frame navigasi + `GPS:`), pembacaan QMC5883L (`NAV_SOURCE_BLE` + `ENABLE_COMPASS=1`), deteksi data basi, jalur loopback |
 | `src/nav_source.h` | Pilihan sumber data `NAV_SOURCE` (SIM / LOOPBACK / BLE) |
+| `src/hw_config.h` | Hardware opsional: `ENABLE_COMPASS` (bawaan 0, board belum punya sensor) |
 | `src/nav_sim.h` | **Kontrak data** `nav_data_t` + API simulator |
 | `src/nav_sim.cpp` | Simulator rute dummy |
 | `src/nav_codec.h/.c` | Encoder/decoder biner pesan `'N'` (C murni, tanpa Arduino/LVGL) |
@@ -184,7 +198,7 @@ NAV_SOURCE_BLE:
   loop():    xQueuePeek() ─► umur data ≤ 3 s dan link tersambung?
                  ├► ui_update_nav_signal(ya/tidak)
                  └► ui_update_nav_display(data terbaru, ble_connected diisi)
-             updateCompass() (QMC5883L) ─► ui_update_gps() (layar debug saja)
+             updateCompass() (hanya ENABLE_COMPASS=1 dan sensor menjawab) ─► ui_update_gps() (layar debug saja)
 
 Semua mode:
 
@@ -333,9 +347,9 @@ tetap terlihat mulus):
 
 ## 9. Pipeline render & performa
 
-Diukur di board: frame yang bergerak butuh rata-rata **10–17 ms** (rata-rata
-per jendela 2 detik), refresh tiap **25 ms** → **±40 fps** (jeda antar-frame
-umumnya 26 ms). Yang membuatnya cukup cepat:
+Diukur di board: frame yang bergerak butuh rata-rata **12–13 ms** dan paling
+berat ±24 ms; refresh tiap **30 ms** → **±33 fps**. Yang membuatnya cukup
+cepat:
 
 - **Lapisan peta digambar sendiri** (`ui_nav_raster.c`): latar, jalan
   samping, tepi/inti rute, dan mulut persimpangan ditulis langsung ke buffer
@@ -349,33 +363,61 @@ umumnya 26 ms). Yang membuatnya cukup cepat:
   RAMWR / RAMWR_CONTINUE; satu transaksi DMA ESP32-S3 maksimal 32 KB).
 - **Panah dan ikon di-cache** sebagai canvas; ikon digambar ulang hanya saat
   maneuver berganti.
-- **Refresh 25 ms** (sedikit di atas waktu render terburuk) dan `loop()`
-  tidur 1 ms: periode yang lebih pendek dari waktu render membuat jarak
-  antar-frame berselang-seling dan terasa patah-patah.
+- **Refresh 30 ms** (di atas frame terberat termasuk tunggu DMA; bagian 13.8)
+  dan `loop()` tidur 1 ms: periode yang lebih pendek dari waktu frame
+  membuat jarak antar-frame berselang-seling dan terasa patah-patah.
 
 Pelajaran yang terbukti lewat pengukuran (berguna saat menambah fitur):
 
 - Biaya LVGL terutama **per tugas gambar dan per putaran render**, bukan per
   piksel. Menambah elemen yang digambar LVGL tiap frame cepat menghabiskan
-  jatah 25 ms; lebih baik lewat rasterizer atau cache gambar.
+  jatah 30 ms; lebih baik lewat rasterizer atau cache gambar.
+- Karena biaya per putaran itu, **buffer parsial lebih lambat** walaupun DMA
+  bisa berjalan bersamaan: callback peta jalan sekali per potongan
+  (diuji 8 Okt 2026, tabel di bawah).
 - Jangan pakai DMA TFT_eSPI di board ini: versi 2.5.43 crash di ESP32-S3,
   dan mencampurnya dengan DMA driver IDF membuat panel mengabaikan frame.
 - `esp_lcd` IDF 4.4 hanya mengizinkan satu transfer berjalan sekaligus, jadi
   tidak dipakai.
 
 **Frame terberat (diukur 8 Okt 2026).** Log performa kini juga mencetak
-waktu frame terberat per jendela; sebelumnya hanya rata-rata, dan angka
-"17 ms" di catatan lama adalah rata-rata itu. Hasilnya, dengan
-instrumentasi sementara yang memecah waktu tiap frame:
+frame terberat, render saja, dan tunggu DMA; sebelumnya hanya rata-rata, dan
+angka "17 ms" di catatan lama adalah rata-rata itu. Tiga skenario yang sama
+diukur berulang (frame / render saja, ms; "lewat" = frame lebih lama dari
+periode refresh):
 
-| Skenario | Frame terberat (mulai render → siap) | Render murni terberat | Frame ≥ 25 ms |
-| --- | --- | --- | --- |
-| `NAV_SOURCE_LOOPBACK`, simulator C, 60 detik (baseline, tanpa state baru) | 27,5 ms | 22,9 ms | 26 |
-| `NAV_SOURCE_BLE`, data terus-menerus dari laptop, 60 detik | 29,3 ms | 23,7 ms | 10 |
-| `NAV_SOURCE_BLE`, jeda/lanjut tiap 8/6 detik, ±32 detik (3× data kembali, 2× tidak ada sinyal) | 27,9 ms | 19,6 ms | 11 |
+| Skenario | Fase 2: 25 ms, poll kompas yang tidak ada | 25 ms, tanpa kompas | **30 ms, tanpa kompas (dipakai)** | Eksperimen: 30 ms, 2 buffer parsial |
+| --- | --- | --- | --- | --- |
+| LOOPBACK, simulator C, 60 detik | 27,5 / 22,9 | 27,9 / 23,5 (18 lewat) | **24,3 / 23,6 (0 lewat)** | 31,8 / 31,8 (1 lewat) |
+| BLE, data terus-menerus, 60 detik | 29,3 / 23,7 | 28,1 / 19,7 (25 lewat) | **19,7 / 19,7 (0 lewat)** | 29,6 / 29,5 (0 lewat) |
+| BLE, jeda/lanjut 8/6 detik, ±32 detik | 27,9 / 19,6 | 29,1 / 20,1 (23 lewat) | **25,3 / 20,5 (0 lewat)** | 29,1 / 29,1 (0 lewat) |
+| Rata-rata frame | 12–14 | 12,7–13,8 | **12,4–13,2** | 20,0–20,9 |
+| Tunggu DMA terberat | ±9,8 | 9,4–10,1 | **2,0–6,7** | 0–1,5 |
+| Heap internal minimum (BLE) | ±35 KB | 44,2 KB | **44,0 KB** | 101,2 KB |
 
-Selisih antara kedua kolom adalah **menunggu DMA frame sebelumnya** (sampai
-±9 ms). Buffer layar hanya satu, jadi LVGL harus menunggu frame sebelumnya
+Kolom pertama diukur dengan instrumentasi sementara di fase 2 (cetak per
+frame berat), kolom lain dengan log performa permanen; jumlah "lewat" kolom
+pertama tidak sebanding sehingga tidak ditulis. Membuang poll kompas tidak
+mengubah frame terberat secara berarti. Menaikkan periode ke 30 ms
+menghilangkan frame yang melewati periode, karena frame berikutnya tidak lagi
+mulai sebelum DMA frame sebelumnya selesai.
+
+Eksperimen dua buffer parsial (2 × 60 baris = 2 × 28,8 KB menggantikan
+115 KB, mode `PARTIAL`): DMA memang berjalan bersamaan dengan render, dan
+RAM yang bebas bertambah ±57 KB. Tapi frame jadi jauh lebih berat (rata-rata
+±20 ms, terberat ±30–32 ms), karena layar dirender dalam potongan 60 baris
+dan seluruh callback gambar (raster peta + kubah) jalan lagi untuk setiap
+potongan. Tidak lebih baik dari periode 30 ms, jadi tidak dipakai.
+
+Rute yang diredupkan (state "tidak ada sinyal") memakai warna redup yang
+dihitung sekali per panggilan gambar (`lv_color_mix` ke warna latar), bukan
+opacity per piksel. Uji A/B dengan LOOPBACK (deterministik), peta dipaksa
+redup terus vs normal: rata-rata 12,4 vs 12,5 ms, terberat 24,3 vs 24,3 ms,
+jadi biayanya tidak terukur.
+
+Catatan berikut menjelaskan pola tunggu DMA yang diukur di fase 2 (periode
+25 ms). Selisih antara frame dan render saja adalah **menunggu DMA frame
+sebelumnya** (sampai ±9 ms). Buffer layar hanya satu, jadi LVGL harus menunggu frame sebelumnya
 selesai terkirim sebelum menggambar lagi. Satu frame yang mengubah rute dan
 busur sekaligus mengirim baris 0–236 (±11,4 ms di 80 MHz). Kalau render
 (13–20 ms di adegan berat: banyak jalan samping, rute berkelok) ditambah DMA
@@ -398,8 +440,8 @@ karena 4 pass, dan ±26 frame ≥ 25 ms di skenario jeda/lanjut):
 
 Satu tambahan sementara masih tersisa: ±0,2 detik setelah data kembali,
 jalan samping lama yang memudar keluar dan yang baru memudar masuk
-tergambar bersamaan (sampai 14), sehingga raster ±2 ms lebih berat. Pilihan
-perbaikan untuk pipeline-nya dicatat di bagian 13.8.
+tergambar bersamaan (sampai 14), sehingga raster ±2 ms lebih berat. Keputusan
+untuk pipeline-nya (periode 30 ms) dicatat di bagian 13.8.
 
 ## 10. Simulator data dummy (`src/nav_sim.cpp`)
 
@@ -437,6 +479,7 @@ sensor dan data BLE mentah.
 | 6 Okt 2026 | Jalan samping dua garis, bisa bengkok, menyatu dengan rute bertepi abu (mulut persimpangan); LVGL dikunci 9.6.0; mode DIRECT + DMA `spi_master`; rasterizer peta → frame terberat 17 ms |
 | 8 Okt 2026 | Fase 1 jalur data asli: format biner pesan `'N'` (encoder/decoder defensif), 31 unit test host, `NAV_SOURCE` menggantikan `USE_DUMMY_DATA`, mode loopback diuji di board (0 error, 40 fps, sama dengan SIM) |
 | 8 Okt 2026 | Fase 2 jalur data asli: fragmentasi BLE (frame `0xCE`, jalan di write 20 B), penerima BLE dengan queue FreeRTOS, state "tidak ada sinyal", pengirim uji Python (`--synthetic`, `--latlon`) diuji end-to-end lewat radio di 514/182/20 B per write; log performa kini mencatat frame terberat |
+| 8 Okt 2026 | Kompas jadi opsional (`ENABLE_COMPASS`, bawaan 0; board belum punya sensor); refresh 25 → 30 ms setelah pengukuran frame terberat; eksperimen buffer parsial ditolak |
 
 ## 13. Persiapan data asli
 
@@ -513,6 +556,14 @@ Yang sudah ada di `src/main.cpp`:
 - Yang diterima: frame navigasi (byte pertama `0xCE`, di bawah) dan pesan
   teks lama `GPS:lat,lon,speed` (mengisi lat/lon/speed untuk layar debug).
   `ROUTE:` hanya dicatat ke log. Frame biner tidak pernah dicetak ke serial.
+- **Aturan pesan teks: setiap pesan teks wajib diawali tag ASCII** (huruf
+  besar diikuti titik dua, seperti `GPS:` dan `ROUTE:`), supaya byte
+  pertamanya tidak pernah `0xCE`. Penerima memilah pesan hanya dari byte
+  pertama, dan `0xCE` juga lead byte UTF-8 yang sah (huruf Yunani
+  U+0380–U+03BF, mis. `Ω` = `CE A9`), jadi teks bebas yang dimulai dengan
+  karakter seperti itu akan masuk jalur frame navigasi (lalu ditolak sebagai
+  header rusak atau potongan yang tak pernah lengkap) dan tidak pernah sampai
+  ke pemroses teks.
 
 **Format biner pesan `'N'`** — sudah diimplementasikan di
 `src/nav_codec.h/.c`, satu pesan = satu jendela rute lengkap,
@@ -626,11 +677,34 @@ mengikuti kecepatan, IMU.
 ### 13.6 Heading
 
 Layar navigasi tidak memakai `bearing_deg`; orientasi heading-up sudah ada
-di koordinat lokal yang dikirim HP. Kompas QMC5883L saat ini hanya
-`atan2(y, x)` mentah tanpa kalibrasi hard/soft-iron dan tanpa kompensasi
-kemiringan (belum ada IMU), jadi belum layak untuk orientasi peta. Ia baru
-berguna kalau ingin memutar peta di antara dua update HP saat motor diam
-atau kecepatan rendah (course GPS tidak andal di bawah ±5 km/h).
+di koordinat lokal yang dikirim HP.
+
+**Kompas belum terpasang** dan belum akan dipasang dalam waktu dekat. Kodenya
+opsional lewat `ENABLE_COMPASS` (`src/hw_config.h`, bawaan 0):
+
+- `0`: tidak ada I2C sama sekali (`Wire` tidak diinisialisasi).
+- `1` (hanya berlaku di `NAV_SOURCE_BLE`): sensor di-probe sekali saat boot.
+  Kalau tidak menjawab, ditandai tidak ada dan tidak pernah di-poll; log
+  hanya satu baris (`⚠ QMC5883L not responding: compass marked absent, not
+  polled`) ditambah satu error I2C dari core Arduino saat probe. Di
+  SIM/LOOPBACK flag ini tidak berpengaruh (heading dari simulator).
+
+Fitur yang bergantung pada heading kompas: **hanya layar debug lama**
+(`UI_START_DEBUG_SCREEN 1`): label heading `H: …°` dan nilai mentah X/Y/Z
+(lewat `ui_update_gps()` di `NAV_SOURCE_BLE`). Tanpa kompas keduanya tetap
+0. Jarum heading di layar debug diberi `bearing_deg` simulator di
+SIM/LOOPBACK, dan di BLE memang tidak pernah diberi data. **Belum ada sumber
+heading lain dari HP**: pesan `'N'` tidak membawa heading (sudah tersirat di
+geometri heading-up), dan `GPS:` hanya lat/lon/kecepatan. Sesuai keputusan,
+tidak dibuat logika baru; kalau layar debug butuh heading tanpa kompas,
+perlu diputuskan dulu (mis. field heading di pesan, atau dihitung dari dua
+posisi `GPS:`).
+
+Kalau nanti dipasang: pembacaannya masih `atan2(y, x)` mentah tanpa
+kalibrasi hard/soft-iron dan tanpa kompensasi kemiringan (belum ada IMU),
+jadi belum layak untuk orientasi peta. Ia baru berguna untuk memutar peta di
+antara dua update HP saat motor diam atau kecepatan rendah (course GPS
+tidak andal di bawah ±5 km/h).
 
 ### 13.7 Frekuensi update
 
@@ -656,11 +730,19 @@ jauh di bawah kapasitas BLE.
 - Sinyal GPS hilang di sisi HP (link BLE masih tersambung): HP sebaiknya
   berhenti mengirim (ESP32 masuk "tidak ada sinyal" setelah 3 detik) atau
   diberi flag tersendiri. Tampilan untuk link putus / data basi sudah ada.
-- Pipeline render: frame tunggal kadang melewati 25 ms karena menunggu DMA
-  (bagian 9). Pilihan: periode refresh ±28–30 ms; buffer ganda (butuh
-  ±115 KB RAM lagi, kemungkinan di PSRAM); atau memangkas pass ganda di
-  frame pergantian manuver (mis. invalidate satu area besar seperti saat
-  state sinyal berganti).
+- **Diputuskan (8 Okt 2026): periode refresh 30 ms** (±33 fps). Alasannya:
+  - Buffer ganda penuh tidak diambil karena RAM tidak cukup: butuh ±115 KB
+    lagi, sedangkan heap internal minimum yang terukur di fase 2 hanya
+    ±35 KB.
+  - Render saja sudah ±23,7 ms di frame terberat, jadi target 25 ms tetap
+    mepet.
+
+  Hasil pengukuran: tidak ada frame yang melewati 30 ms, frame terberat
+  ≤ 25,3 ms (bagian 9). Eksperimen dua buffer parsial (¼ layar) diukur dan
+  ditolak: RAM bebas +57 KB, tapi frame rata-rata ±20 ms dan terberat
+  ±30–32 ms karena callback peta jalan sekali per potongan. Yang masih bisa
+  dicoba nanti kalau perlu fps lebih tinggi: memangkas pass ganda di frame
+  pergantian manuver (render saja terberat ±23,7 ms terjadi di sana).
 - Informasi tambahan di layar (nama jalan, ETA, sisa jarak total) — perlu
   ruang di panel dan biaya render (bagian 9).
 - Nasib pesan lama `GPS:` dan `ROUTE:`.
@@ -670,14 +752,11 @@ jauh di bawah kapasitas BLE.
 - Ada satu jeda ±55 ms sekali, ±9 detik setelah boot (kemungkinan pemuatan
   pertama sesuatu, mis. glyph font); setelah itu tidak berulang.
 - RAM 78% terpakai (buffer layar penuh 115 KB).
-- Frame tunggal bisa 25–29 ms (bagian 9), jeda antar-frame sesekali
-  35–60 ms; rata-rata tetap ±38–40 fps.
-- **QMC5883L tidak merespons di board saat ini** (`⚠ QMC5883L not
-  responding` saat boot). Di `NAV_SOURCE_BLE`, kode pembacaan kompas yang
-  lama (tidak diubah) tetap mencoba tiap 100 ms dan mencetak
-  `[E][Wire.cpp] requestFrom(): ... Error -1` 10 kali per detik ke serial.
-  Kemungkinan ikut menambah jeda antar-frame di mode itu. Perlu cek kabel
-  sensor atau tunda polling saat init gagal.
+- Frame terberat ±24–25 ms dengan refresh 30 ms (bagian 9). Jeda antar-frame
+  sesekali masih 40–55 ms (juga di LOOPBACK, tanpa BLE dan tanpa kompas);
+  penyebabnya belum diselidiki.
+- Kompas belum terpasang; layar debug lama menampilkan heading dan X/Y/Z 0
+  (bagian 13.6).
 - Pesan serial dari task BLE dan `loop()` kadang tercampur/terpotong
   (mis. `✓ BLE Client c`), karena keduanya mencetak ke USB-CDC bersamaan.
 - Sisa peringatan kompilasi: `lv_obj_remove_flag` di

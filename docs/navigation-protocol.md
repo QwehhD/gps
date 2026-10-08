@@ -97,6 +97,14 @@ teks ASCII; `onWrite` membedakan keduanya dari byte pertama. Header 4 byte:
 write 20 byte membawa 16 byte isi (pesan terbesar = 18 frame), write 182
 byte → 2 frame, MTU 517 → 1 frame.
 
+**Aturan pesan teks: setiap pesan teks wajib diawali tag ASCII** (huruf
+besar diikuti titik dua, seperti `GPS:` dan `ROUTE:`), supaya byte
+pertamanya tidak pernah `0xCE`. `0xCE` juga lead byte UTF-8 yang sah (huruf
+Yunani U+0380–U+03BF, mis. `Ω` = `CE A9`): teks bebas yang dimulai dengan
+karakter seperti itu akan masuk jalur frame navigasi (lalu ditolak sebagai
+header rusak atau potongan yang tak pernah lengkap) dan tidak pernah sampai
+ke pemroses teks.
+
 Perakitan di penerima (`nav_frag_push`), buffer tetap 275 byte, berurutan:
 
 - Write BLE sampai berurutan atau tidak sama sekali, jadi indeks yang
@@ -211,9 +219,10 @@ Pada `NAV_SOURCE_SIM` dan `NAV_SOURCE_LOOPBACK`, data 100% simulasi software:
 - **Tidak ada pembacaan QMC5883L sama sekali.** Kode inisialisasi dan
   polling QMC5883L (soft reset `0x80`→`0x0A`, set/reset period
   `0x01`→`0x0B`, continuous mode `0x1D`→`0x09`) masih ada di
-  `src/main.cpp`, tapi hanya dikompilasi untuk `NAV_SOURCE_BLE` — jadi
-  tidak pernah dipanggil di mode simulasi. Tidak ada transaksi I2C
-  apa pun ke alamat sensor ini dalam mode simulasi.
+  `src/main.cpp`, tapi hanya dikompilasi untuk `NAV_SOURCE_BLE` dengan
+  `ENABLE_COMPASS=1` (`src/hw_config.h`, bawaan 0; board belum punya
+  sensornya) — jadi tidak pernah dipanggil di mode simulasi. Tidak ada
+  transaksi I2C apa pun ke alamat sensor ini dalam mode simulasi.
 - **Bearing/heading 100% simulasi**, berupa sapuan halus 0°→360° berulang
   (~13 detik per putaran), murni fungsi waktu — bukan pembacaan kompas
   fisik dalam bentuk apa pun, bukan cuma bearing tujuan. Bearing tidak
@@ -231,7 +240,7 @@ Pada `NAV_SOURCE_SIM` dan `NAV_SOURCE_LOOPBACK`, data 100% simulasi software:
   terisolasi total dari status/ketersediaan hardware sensor.
 
 Mode loopback sudah diuji di board: 0 paket gagal, ±400–500 paket/detik
-(satu per `loop()`), 40 fps dengan waktu render dan jumlah piksel per
+(satu per `loop()`), fps penuh dengan waktu render dan jumlah piksel per
 frame yang sama dengan `NAV_SOURCE_SIM` (simulatornya deterministik, jadi
 rutenya identik). Test host `test/test_nav_loopback` menjalankan 40.000
 update simulator lewat codec dan memastikan selisihnya tidak melewati
@@ -336,15 +345,17 @@ Gerakan dibuat halus di sisi UI, jadi data boleh datang patah-patah
 
 ### Performa di ESP32-S3 (diukur di board)
 
-Frame yang bergerak butuh rata-rata ±10–17 ms (rata-rata per jendela 2
-detik), jadi refresh tiap 25 ms memberi ±40 fps. Angka ini bisa dilihat
-sendiri dengan mengubah `LV_PORT_PERF_LOG` di `src/lv_port_disp.cpp`
-menjadi `1` (atau `-DLV_PORT_PERF_LOG=1`): FPS, jeda terlama antar-frame,
-waktu render rata-rata dan **terberat**, serta piksel per frame dicetak ke
-serial tiap 2 detik. Frame tunggal bisa mencapai 25–29 ms karena menunggu
-DMA frame sebelumnya (satu buffer layar); rinciannya ada di
-`docs/dokumentasi-proyek.md` bagian 9. Hal-hal yang membuatnya cukup cepat,
-semuanya diukur:
+Frame yang bergerak butuh rata-rata ±12–13 ms dan paling berat ±24 ms, jadi
+refresh tiap 30 ms memberi ±33 fps tanpa frame yang melewati periode. Angka
+ini bisa dilihat sendiri dengan mengubah `LV_PORT_PERF_LOG` di
+`src/lv_port_disp.cpp` menjadi `1` (atau `-DLV_PORT_PERF_LOG=1`): FPS, jeda
+terlama antar-frame, frame rata-rata dan **terberat**, render saja, tunggu
+DMA, jumlah frame yang melewati periode, serta piksel per frame dicetak ke
+serial tiap 2 detik. Dengan periode 25 ms dulu, frame tunggal bisa
+mencapai 27–29 ms karena menunggu DMA frame sebelumnya (satu buffer layar);
+pengukuran lengkap dan eksperimen buffer parsial yang ditolak ada di
+`docs/dokumentasi-proyek.md` bagian 9 dan 13.8. Hal-hal yang membuatnya
+cukup cepat, semuanya diukur:
 
 - **Lapisan peta digambar sendiri** (`screens/ui_nav_raster.c`): latar,
   jalan samping, tepi dan inti rute, serta mulut persimpangan ditulis
@@ -381,10 +392,11 @@ semuanya diukur:
   `esp_lcd` juga tidak dipakai: di IDF 4.4 ia hanya mengizinkan satu
   transfer berjalan, jadi frame yang lebih besar dari satu transfer harus
   ditunggu.
-- **Refresh tiap 25 ms**, sedikit di atas waktu render terburuk. Periode yang
-  lebih pendek dari waktu render membuat jarak antar-frame berselang-seling
-  satu/dua periode dan terasa patah-patah. `loop()` hanya tidur 1 ms supaya
-  timer LVGL tidak bergeser.
+- **Refresh tiap 30 ms**, di atas frame terberat termasuk tunggu DMA
+  (dinaikkan dari 25 ms pada 8 Okt 2026). Periode yang lebih pendek dari
+  waktu frame membuat jarak antar-frame berselang-seling satu/dua periode
+  dan terasa patah-patah. `loop()` hanya tidur 1 ms supaya timer LVGL tidak
+  bergeser.
 - **`-O2`** menggantikan `-Os` bawaan framework (di `platformio.ini`).
 
 Layar debug lama (lat/lon, kompas X/Y/Z, jarum heading) masih ada: ubah
@@ -393,6 +405,8 @@ Layar debug lama (lat/lon, kompas X/Y/Z, jarum heading) masih ada: ubah
 ### Hal yang belum diimplementasikan (di luar cakupan dokumen ini)
 
 - **IMU (MPU6050)**: belum ada di hardware, belum ada kode pembacaannya.
+- **Kompas QMC5883L**: belum terpasang. Kodenya opsional (`ENABLE_COMPASS`)
+  dan hanya dipakai layar debug lama; tidak ada sumber heading lain dari HP.
   Field yang nanti butuh data IMU (mis. tilt-compensated heading) belum
   ditentukan strukturnya.
 - **App HP**: belum. Pengirim uji di laptop (`tools/ble_sender/`) mengisi
