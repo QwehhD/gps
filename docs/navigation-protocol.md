@@ -1,12 +1,13 @@
-# Protokol Navigasi (Rencana BLE + Mode Dummy Data)
+# Protokol Navigasi (BLE + Mode Sumber Data)
 
 Dokumen ini mencatat desain protokol navigasi untuk dashboard motor —
 supaya keputusan desain (format payload, orientasi garis skematik, opsi
 junction view) tidak hilang begitu implementasi sensor/BLE beneran mulai
-dikerjakan. Yang sudah jalan: mode simulasi software dan **format pesan
-biner `'N'`** (encoder/decoder, diuji di host dan lewat mode loopback di
-board). Yang belum: penerima pesan itu di callback BLE dan app HP
-pengirimnya (lihat bagian "Mode Sumber Data").
+dikerjakan. Yang sudah jalan: mode simulasi software, **format pesan biner
+`'N'`**, **fragmentasi BLE**, penerima di ESP32 dengan state "tidak ada
+sinyal", dan pengirim uji di laptop (`tools/ble_sender/`) yang juga memuat
+implementasi referensi konversi lat/lon untuk app HP. Yang belum: app HP
+itu sendiri (lihat bagian "Mode Sumber Data").
 
 ## 1. Format Payload BLE: pesan biner `'N'`
 
@@ -74,10 +75,71 @@ checksum: link layer BLE sudah punya CRC. `bearing_deg` dan
 `ble_connected` tidak ikut dikirim; decoder mengisinya 0/`false` untuk
 diisi pemanggil.
 
-Pesan teks lama (`GPS:lat,lon,speed`, `ROUTE:...`) diawali huruf lain,
-jadi tidak bentrok dengan `'N'`. Penerimanya di `src/main.cpp` masih
-hanya memahami pesan teks itu; parser `'N'` di callback BLE dikerjakan di
-fase berikutnya.
+### Transport BLE: frame
+
+Pesan `'N'` tidak dikirim mentah. Pesan terbesar (275 byte) tidak muat satu
+write di iOS (±182 byte) atau di MTU minimum BLE (20 byte), jadi setiap
+pesan dipecah menjadi satu atau beberapa **frame**, satu frame = satu write
+ke RX `6E400002-…` (write without response). `nav_encode`/`nav_decode` tidak
+tahu soal frame; pemecah dan perakitnya ada di `src/nav_frag.h/.c`:
+
+| Offset | Ukuran | Field |
+| --- | --- | --- |
+| 0 | 1 | Tipe frame `0xCE` |
+| 1 | 1 | Nomor pesan (pengirim memakai nomor urut `'N'` yang sama) |
+| 2 | 1 | Indeks potongan, 0 … jumlah − 1 |
+| 3 | 1 | Jumlah potongan, 1–32 |
+| 4 | 1+ | Potongan isi pesan berikutnya |
+
+Isi pesan = sambungan potongan sesuai urutan indeks. `0xCE` (= `0x80 | 'N'`)
+punya bit tertinggi menyala, jadi tidak pernah menjadi byte pertama pesan
+teks ASCII; `onWrite` membedakan keduanya dari byte pertama. Header 4 byte:
+write 20 byte membawa 16 byte isi (pesan terbesar = 18 frame), write 182
+byte → 2 frame, MTU 517 → 1 frame.
+
+Perakitan di penerima (`nav_frag_push`), buffer tetap 275 byte, berurutan:
+
+- Write BLE sampai berurutan atau tidak sama sekali, jadi indeks yang
+  melompat berarti potongan hilang: pesan dibuang, sisa frame-nya
+  diabaikan. Potongan pertama pesan baru sebelum pesan lama lengkap juga
+  membuang pesan lama. **Tidak ada retransmit.**
+- Potongan dobel diabaikan; pesan yang sudah lengkap tidak pernah
+  dikeluarkan dua kali.
+- Header yang tidak masuk akal → frame dibuang (`NAV_FRAG_BAD`): tipe
+  salah, tanpa isi, jumlah 0 atau > 32, indeks ≥ jumlah, jumlah berubah di
+  tengah pesan, pesan yang tumbuh melebihi 275 byte.
+- `nav_frag_reset()` saat link tersambung/putus; statistik (lengkap,
+  dibuang, frame rusak, dobel) tetap.
+
+Diuji di host (`test/test_nav_frag`, 20 test termasuk fuzz 300.000 frame
+acak, juga di bawah ASan/UBSan) dan lewat radio di write 514, 182, dan 20
+byte. Vektor byte yang sama dicek oleh unit test C dan pytest pengirim.
+
+### Penerimaan di ESP32 (`NAV_SOURCE_BLE`)
+
+`src/nav_rx.cpp`, stack BLE **Bluedroid** (library `BLEDevice` Arduino-ESP32
+2.0.17):
+
+```
+task BLE:  onWrite ─► byte 0 = 0xCE ─► nav_frag_push ─► nav_decode ─► xQueueOverwrite (queue panjang 1)
+loop():    xQueuePeek ─► umur ≤ 3 s && tersambung ─► ui_update_nav_signal() + ui_update_nav_display()
+```
+
+- Task BLE tidak menyentuh LVGL. Struct besar di jalur terima `static`
+  karena stack task Bluedroid (BTC) hanya 3 KB.
+- Paket hilang dihitung dari selisih nomor urut `'N'` (mencakup pesan yang
+  dibuang perakit karena potongan hilang dan pesan yang tidak pernah tiba).
+- Saat link putus, queue dikosongkan dan perakit direset; layar langsung
+  masuk "tidak ada sinyal". Tanpa pesan valid > 3 detik juga begitu
+  (`NAV_RX_STALE_MS`). **Tidak ada fallback ke simulator.**
+- Serial tiap 5 detik selama tersambung, contoh:
+  `ble: connected | msgs 165 (4.2/s) | frames: complete 165, dropped 17 (missing chunk), bad 0, dup 0 | decode errors 0 | lost by seq 21 | internal heap free 42972 B (min 35272, largest 32756)`.
+- Heap internal bebas saat runtime: ±46,7 KB sebelum tersambung, ±42,8 KB
+  saat menerima, minimum tercatat ±35 KB.
+
+Pesan teks lama tetap diterima: `GPS:lat,lon,speed` mengisi label layar
+debug, `ROUTE:` hanya dicatat ke log. Di `NAV_SOURCE_SIM`/`LOOPBACK`, frame
+`0xCE` diabaikan.
 
 ## 2. Garis Skematik (Schematic Line)
 
@@ -136,8 +198,8 @@ Sumber data layar navigasi dipilih saat kompilasi lewat `NAV_SOURCE` di
 | Nilai | Isi |
 | --- | --- |
 | `NAV_SOURCE_SIM` (bawaan) | Simulator langsung ke UI |
-| `NAV_SOURCE_LOOPBACK` | Simulator → `nav_encode()` → paket `'N'` → `nav_decode()` → UI. Membuktikan format biner tanpa radio; ukuran paket rata-rata/maksimum dicatat ke serial tiap 5 detik |
-| `NAV_SOURCE_BLE` | Data asli dari HP lewat BLE (penerimanya belum ada, lihat bagian 1) |
+| `NAV_SOURCE_LOOPBACK` | Simulator → `nav_encode()` → frame 20 byte → `nav_frag_push()` → `nav_decode()` → UI. Membuktikan format biner dan fragmentasi tanpa radio; ukuran paket rata-rata/maksimum dicatat ke serial tiap 5 detik |
+| `NAV_SOURCE_BLE` | Data asli dari HP (sementara pengirim uji di laptop) lewat BLE, bagian 1 |
 
 Ganti bawaannya di `src/nav_source.h`, atau per build lewat
 `-DNAV_SOURCE=NAV_SOURCE_LOOPBACK` di `build_flags`. Nama yang salah ketik
@@ -175,10 +237,11 @@ rutenya identik). Test host `test/test_nav_loopback` menjalankan 40.000
 update simulator lewat codec dan memastikan selisihnya tidak melewati
 batas kuantisasi.
 
-Untuk data asli, pilih `NAV_SOURCE_BLE` dan isi `nav_data_t` dari
-`nav_decode()` atas pesan `'N'` — kode UI di `screens/ui_nav_display.c`
-dan `screens/ui_gps_tracker.c` tidak perlu diubah karena sudah membaca
-dari struct `nav_data_t` yang sama, bukan langsung dari nav_sim.
+Di `NAV_SOURCE_BLE`, `nav_data_t` diisi dari `nav_decode()` atas pesan
+`'N'` yang dirakit dari frame BLE (bagian 1). Kode gambar UI tidak perlu
+diubah karena sudah membaca dari struct `nav_data_t` yang sama; tambahannya
+hanya `ui_update_nav_signal()` untuk state "tidak ada sinyal" (bagian 6).
+Untuk menguji tanpa app HP, pakai `tools/ble_sender/` (lihat README-nya).
 
 ## 5. Struct/Field Mock Data (`nav_data_t`)
 
@@ -198,7 +261,7 @@ typedef struct {
     uint8_t schematic_point_count;         // jumlah titik yang valid di atas
     nav_side_road_t side_roads[8];         // cabang jalan: polyline maks. 4 titik, titik 0 di rute
     uint8_t side_road_count;               // jumlah cabang yang valid di atas
-    bool ble_connected;                    // placeholder, selalu false di mode dummy
+    bool ble_connected;                    // link app HP tersambung (NAV_SOURCE_BLE); false di mode simulasi
 } nav_data_t;
 ```
 
@@ -238,6 +301,18 @@ dan hanya membaca `nav_data_t`:
   dalam km dengan satu desimal mulai ~1 km.
 - **Busur progres** di tepi bawah: terisi dari kiri ke kanan dalam 500 m
   terakhir sebelum belokan (`PROGRESS_RANGE_M`), kosong kalau masih jauh.
+- **State "tidak ada sinyal"** (`ui_nav_display_set_signal(false)`; dipakai
+  di `NAV_SOURCE_BLE` saat link putus atau > 3 detik tanpa pesan valid):
+  peta memudar ke ±30% kecerahan lewat rasterizer (warna dicampur ke latar,
+  ±0,4 detik), ikon diganti batang sinyal abu yang dicoret oranye (di-cache
+  seperti ikon maneuver), jarak menjadi `--` abu, satuan kosong, busur
+  progres langsung kosong. Rute terakhir tetap terlihat redup, tapi panah
+  belok dan jarak lama tidak pernah tampil seolah masih berlaku. Saat data
+  kembali, peta memudar terang lagi dan bergeser mulus ke posisi baru. Saat
+  state berganti, seluruh layar digambar ulang dalam satu pass (bukan empat
+  area terpisah) dan busur tidak beranimasi, supaya frame transisi tidak
+  lebih berat dari frame biasa; setelah pudar selesai layar diam tidak
+  digambar ulang.
 
 Gerakan dibuat halus di sisi UI, jadi data boleh datang patah-patah
 (mis. BLE 1x per detik):
@@ -261,11 +336,15 @@ Gerakan dibuat halus di sisi UI, jadi data boleh datang patah-patah
 
 ### Performa di ESP32-S3 (diukur di board)
 
-Frame yang bergerak butuh ±10–17 ms, jadi refresh tiap 25 ms memberi 40 fps
-stabil. Angka ini bisa dilihat sendiri dengan mengubah `LV_PORT_PERF_LOG`
-di `src/lv_port_disp.cpp` menjadi `1`: FPS, jeda terlama antar-frame, dan
-waktu render dicetak ke serial tiap 2 detik. Hal-hal yang membuatnya cukup
-cepat, semuanya diukur:
+Frame yang bergerak butuh rata-rata ±10–17 ms (rata-rata per jendela 2
+detik), jadi refresh tiap 25 ms memberi ±40 fps. Angka ini bisa dilihat
+sendiri dengan mengubah `LV_PORT_PERF_LOG` di `src/lv_port_disp.cpp`
+menjadi `1` (atau `-DLV_PORT_PERF_LOG=1`): FPS, jeda terlama antar-frame,
+waktu render rata-rata dan **terberat**, serta piksel per frame dicetak ke
+serial tiap 2 detik. Frame tunggal bisa mencapai 25–29 ms karena menunggu
+DMA frame sebelumnya (satu buffer layar); rinciannya ada di
+`docs/dokumentasi-proyek.md` bagian 9. Hal-hal yang membuatnya cukup cepat,
+semuanya diukur:
 
 - **Lapisan peta digambar sendiri** (`screens/ui_nav_raster.c`): latar,
   jalan samping, tepi dan inti rute, serta mulut persimpangan ditulis
@@ -316,9 +395,9 @@ Layar debug lama (lat/lon, kompas X/Y/Z, jarum heading) masih ada: ubah
 - **IMU (MPU6050)**: belum ada di hardware, belum ada kode pembacaannya.
   Field yang nanti butuh data IMU (mis. tilt-compensated heading) belum
   ditentukan strukturnya.
-- **Penerima pesan `'N'` di BLE dan app HP pengirimnya**: belum. Codec
-  dan mode loopback sudah ada (bagian 1 dan 4), tapi BLE server yang aktif
-  sekarang di `src/main.cpp` masih hanya memahami protokol lama (`GPS:`,
-  `ROUTE:`). Berikutnya: parser `'N'` di callback BLE, serah-terima
-  antar-task lewat queue FreeRTOS, tampilan data basi, dan pengirim uji di
-  laptop.
+- **App HP**: belum. Pengirim uji di laptop (`tools/ble_sender/`) mengisi
+  perannya untuk pengujian; `navgeo.py` di sana adalah implementasi
+  referensi konversi lat/lon → jendela heading-up yang nanti diporting ke
+  app.
+- **Pemisahan pesan geometri/pose** dan **zoom mengikuti kecepatan**: opsi
+  untuk nanti.
