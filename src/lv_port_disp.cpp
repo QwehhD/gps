@@ -41,10 +41,12 @@ static volatile bool frame_sent = true;
 #define TX_LAST 2u // last transaction of the frame
 
 // LVGL redraws at most this often. A moving navigation frame takes 10-17 ms
-// on the ESP32-S3 (measured), so 25 ms gives a
-// steady 40 fps; a period shorter than the frame time would make frames
-// alternate between one and two periods, which reads as stutter.
-#define REFRESH_PERIOD_MS 25
+// on average, but the heaviest render up to ~24 ms, and with one buffer a
+// frame must also wait for the previous frame's DMA (up to ~11 ms for the
+// whole screen). At 25 ms such frames overran the period; 30 ms (~33 fps)
+// leaves room. A period shorter than the frame time makes frames alternate
+// between one and two periods, which reads as stutter.
+#define REFRESH_PERIOD_MS 30
 
 // GC9A01 commands used per frame.
 #define LCD_CMD_CASET 0x2A
@@ -52,8 +54,10 @@ static volatile bool frame_sent = true;
 #define LCD_CMD_RAMWR 0x2C
 #define LCD_CMD_RAMWR_CONTINUE 0x3C
 
-// 1 = print frame rate and render/flush timings to Serial every 2 s. Can
-// also be set per build with -DLV_PORT_PERF_LOG=1.
+// 1 = print frame rate and frame timings to Serial every 2 s. Can also be
+// set per build with -DLV_PORT_PERF_LOG=1. A frame's time runs from the start
+// of rendering until it is queued for sending; it includes any wait for the
+// previous frame's DMA (single buffer), which "render only" leaves out.
 #ifndef LV_PORT_PERF_LOG
 #define LV_PORT_PERF_LOG 0
 #endif
@@ -68,11 +72,16 @@ static uint32_t perf_window_ms;
 static uint32_t perf_last_start_us;
 static uint32_t perf_max_gap_us;
 static uint32_t perf_max_render_us;
+static uint32_t perf_max_work_us;   // heaviest frame without its DMA wait
+static uint32_t perf_max_wait_us;   // longest wait for the previous frame's DMA
+static uint32_t perf_over_period;   // frames longer than REFRESH_PERIOD_MS
+static uint32_t perf_frame_wait_us; // DMA wait within the current frame
 
 static void perf_render_start_cb(lv_event_t *e)
 {
     (void)e;
     perf_render_start_us = micros();
+    perf_frame_wait_us = 0;
     if (perf_last_start_us != 0 && perf_render_start_us - perf_last_start_us > perf_max_gap_us)
     {
         perf_max_gap_us = perf_render_start_us - perf_last_start_us;
@@ -89,17 +98,33 @@ static void perf_render_ready_cb(lv_event_t *e)
     {
         perf_max_render_us = render_us;
     }
+    if (render_us - perf_frame_wait_us > perf_max_work_us)
+    {
+        perf_max_work_us = render_us - perf_frame_wait_us;
+    }
+    if (perf_frame_wait_us > perf_max_wait_us)
+    {
+        perf_max_wait_us = perf_frame_wait_us;
+    }
+    if (render_us > REFRESH_PERIOD_MS * 1000u)
+    {
+        perf_over_period++;
+    }
     perf_frames++;
     uint32_t now = millis();
     if (now - perf_window_ms >= 2000)
     {
         float secs = (now - perf_window_ms) / 1000.0f;
-        Serial.printf("[perf] %.1f fps | longest gap %.1f ms | render+flush %.1f ms/frame, max %.1f (flush %.1f ms) | %lu px/frame\n",
+        Serial.printf("[perf] %.1f fps | longest gap %.1f ms | frame avg %.1f ms, max %.1f ms "
+                      "(render only max %.1f, DMA wait max %.1f) | %lu over %d ms | flush %.1f ms | %lu px/frame\n",
                       perf_frames / secs, perf_max_gap_us / 1000.0f,
                       perf_frames ? perf_render_us / 1000.0f / perf_frames : 0.0f, perf_max_render_us / 1000.0f,
+                      perf_max_work_us / 1000.0f, perf_max_wait_us / 1000.0f,
+                      (unsigned long)perf_over_period, REFRESH_PERIOD_MS,
                       perf_frames ? perf_flush_us / 1000.0f / perf_frames : 0.0f,
                       perf_frames ? (unsigned long)(perf_px / perf_frames) : 0UL);
         perf_render_us = perf_flush_us = perf_frames = perf_px = perf_max_gap_us = perf_max_render_us = 0;
+        perf_max_work_us = perf_max_wait_us = perf_over_period = 0;
         perf_window_ms = now;
     }
 }
@@ -154,9 +179,15 @@ static void queue_cmd(uint8_t cmd)
 static void flush_wait(lv_display_t *disp)
 {
     (void)disp;
+#if LV_PORT_PERF_LOG
+    uint32_t t0 = micros();
+#endif
     while (!frame_sent)
     {
     }
+#if LV_PORT_PERF_LOG
+    perf_frame_wait_us += micros() - t0;
+#endif
 }
 
 // Rows changed during the current refresh. In DIRECT mode every invalidated
