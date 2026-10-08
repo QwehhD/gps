@@ -16,11 +16,6 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-// Set to 1 to drive the UI entirely from this simulator (no QMC5883L I2C
-// traffic, no real GPS/BLE data is read). Set to 0 once real sensors/BLE
-// are wired up.
-#define USE_DUMMY_DATA 1
-
 #ifdef __cplusplus
 extern "C"
 {
@@ -63,10 +58,10 @@ extern "C"
 
 #define NAV_SIDE_ROADS_MAX 8
 
-    // Mirrors the planned BLE "NAV:" payload fields one-to-one, plus a
-    // connection flag for the (not-yet-implemented) phone-app link. This is
-    // the single struct the UI layer reads from, regardless of whether the
-    // data actually came from this simulator or from real sensors/BLE.
+    // Everything except bearing_deg and ble_connected travels in the BLE 'N'
+    // message (nav_codec.h). This is the single struct the UI layer reads
+    // from, regardless of whether the data actually came from this simulator
+    // or from real sensors/BLE (see nav_source.h).
     typedef struct
     {
         float bearing_deg;                                  // 0-359.9, compass heading

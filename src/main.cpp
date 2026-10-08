@@ -10,6 +10,8 @@
 #include "../ui.h"
 #include "../screens/ui_watch_digital.h"
 #include "nav_sim.h"
+#include "nav_source.h"
+#include "nav_codec.h"
 
 // Forward declarations for LVGL port
 extern void lv_port_disp_init(void);
@@ -114,10 +116,10 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
   }
 };
 
-// QMC5883L polling. Left completely untouched, but NOT called anywhere
-// while USE_DUMMY_DATA is set (see nav_sim.h) — heading comes from the
-// simulator instead, with zero I2C traffic to the sensor.
-#if !USE_DUMMY_DATA
+// QMC5883L polling. Left completely untouched, but only built for
+// NAV_SOURCE_BLE (see nav_source.h) — the simulated sources take the heading
+// from the simulator instead, with zero I2C traffic to the sensor.
+#if NAV_SOURCE == NAV_SOURCE_BLE
 void updateCompass()
 {
   static uint32_t lastUpdate = 0;
@@ -157,7 +159,55 @@ void updateCompass()
     }
   }
 }
-#endif // !USE_DUMMY_DATA
+#endif // NAV_SOURCE == NAV_SOURCE_BLE
+
+#if NAV_SOURCE == NAV_SOURCE_LOOPBACK
+// Sends the simulator output through the BLE wire format (encode, then
+// decode) so the display shows exactly what would survive the trip from the
+// phone. Logs the packet sizes every few seconds.
+static const nav_data_t *nav_loopback(const nav_data_t *sim)
+{
+  static uint8_t packet[NAV_MSG_MAX_SIZE];
+  static nav_data_t decoded;
+  static uint8_t tx_seq = 0;
+  static uint32_t packets = 0;
+  static uint32_t errors = 0;
+  static uint64_t total_bytes = 0;
+  static size_t max_bytes = 0;
+  static uint32_t last_log_ms = millis();
+  static uint32_t last_log_packets = 0;
+
+  size_t len = nav_encode(sim, packet, sizeof(packet), tx_seq);
+  uint8_t rx_seq = 0;
+  nav_decode_status_t status = nav_decode(packet, len, &decoded, &rx_seq);
+  if (status != NAV_DECODE_OK || rx_seq != tx_seq)
+  {
+    // decoded keeps the last good packet.
+    errors++;
+    Serial.printf("loopback: decode failed: %s (%u bytes, seq %u/%u)\n",
+                  nav_decode_status_str(status), (unsigned)len, (unsigned)tx_seq, (unsigned)rx_seq);
+  }
+  tx_seq++;
+  packets++;
+  total_bytes += len;
+  if (len > max_bytes)
+  {
+    max_bytes = len;
+  }
+
+  uint32_t now = millis();
+  if (now - last_log_ms >= 5000)
+  {
+    Serial.printf("loopback: %lu packets (%lu/s), avg %.1f B, max %u B, errors %lu\n",
+                  (unsigned long)packets,
+                  (unsigned long)((packets - last_log_packets) * 1000UL / (now - last_log_ms)),
+                  (double)total_bytes / packets, (unsigned)max_bytes, (unsigned long)errors);
+    last_log_ms = now;
+    last_log_packets = packets;
+  }
+  return &decoded;
+}
+#endif // NAV_SOURCE == NAV_SOURCE_LOOPBACK
 
 void setup()
 {
@@ -179,11 +229,16 @@ void setup()
   tft.setTextColor(TFT_GREEN, TFT_BLACK);
   tft.drawCentreString("GPS TRACKER", 120, 50, 4);
 
-#if USE_DUMMY_DATA
-  // Dummy-data mode: no I2C bus, no QMC5883L access at all — everything the
+#if NAV_SOURCE != NAV_SOURCE_BLE
+  // Simulated sources: no I2C bus, no QMC5883L access at all — everything the
   // UI shows (heading included) comes from nav_sim instead.
-  Serial.println("USE_DUMMY_DATA=1: skipping QMC5883L init, simulating nav data");
+#if NAV_SOURCE == NAV_SOURCE_LOOPBACK
+  Serial.println("NAV_SOURCE=LOOPBACK: skipping QMC5883L init, simulated nav data through the codec");
+  tft.drawCentreString("LOOPBACK MODE", 120, 130, 2);
+#else
+  Serial.println("NAV_SOURCE=SIM: skipping QMC5883L init, simulating nav data");
   tft.drawCentreString("DUMMY DATA MODE", 120, 130, 2);
+#endif
   nav_sim_init();
 #else
   Wire.begin(2, 1);
@@ -230,7 +285,7 @@ void setup()
     Serial.println("⚠ QMC5883L not responding");
     tft.drawCentreString("QMC ERR", 120, 130, 1);
   }
-#endif // USE_DUMMY_DATA
+#endif // NAV_SOURCE != NAV_SOURCE_BLE
 
   // BLE Setup (Tetap sesuai aslinya)
   BLEDevice::init("GPS_Tracker_BLE");
@@ -257,13 +312,17 @@ void loop()
 {
   lv_timer_handler();
 
-#if USE_DUMMY_DATA
+#if NAV_SOURCE != NAV_SOURCE_BLE
   // Advance the simulator every iteration and push the heading and the
   // navigation display data right away so they move smoothly (~30fps+); the
   // debug screen's text/schematic updates are throttled below since they
   // don't need frame-rate refresh.
   nav_sim_update(millis());
   const nav_data_t *nav = nav_sim_get_data();
+#if NAV_SOURCE == NAV_SOURCE_LOOPBACK
+  // bearing_deg is not on the wire, so the debug screen's needle stays at 0.
+  nav = nav_loopback(nav);
+#endif
   ui_update_nav_heading(nav->bearing_deg);
   ui_update_nav_display(nav);
 
@@ -290,7 +349,7 @@ void loop()
                   gpsData.speed, compassData.heading,
                   compassData.x, compassData.y, compassData.z, deviceConnected);
   }
-#endif // USE_DUMMY_DATA
+#endif // NAV_SOURCE != NAV_SOURCE_BLE
 
   // Short sleep: LVGL's timers only run when loop() comes back here, so a
   // longer delay would make the display refresh drift by up to that much.
