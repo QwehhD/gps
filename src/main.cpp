@@ -12,6 +12,7 @@
 #include "../screens/ui_watch_digital.h"
 #include "nav_sim.h"
 #include "nav_source.h"
+#include "hw_config.h"
 #include "nav_codec.h"
 #include "nav_frag.h"
 #include "nav_rx.h"
@@ -136,12 +137,22 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
   }
 };
 
-// QMC5883L polling. Left completely untouched, but only built for
-// NAV_SOURCE_BLE (see nav_source.h) — the simulated sources take the heading
-// from the simulator instead, with zero I2C traffic to the sensor.
-#if NAV_SOURCE == NAV_SOURCE_BLE
+// The compass is only read in NAV_SOURCE_BLE builds that have one fitted
+// (hw_config.h); the simulated sources take the heading from the simulator,
+// with zero I2C traffic.
+#define COMPASS_ACTIVE (ENABLE_COMPASS && NAV_SOURCE == NAV_SOURCE_BLE)
+
+#if COMPASS_ACTIVE
+// Set by the probe in setup(); a sensor that did not answer is never polled.
+bool compassPresent = false;
+
+// QMC5883L polling, unchanged apart from the presence check.
 void updateCompass()
 {
+  if (!compassPresent)
+  {
+    return;
+  }
   static uint32_t lastUpdate = 0;
   if (millis() - lastUpdate > 100)
   {
@@ -179,7 +190,7 @@ void updateCompass()
     }
   }
 }
-#endif // NAV_SOURCE == NAV_SOURCE_BLE
+#endif // COMPASS_ACTIVE
 
 #if NAV_SOURCE == NAV_SOURCE_LOOPBACK
 // Sends the simulator output through the BLE wire format (encode, split
@@ -277,7 +288,13 @@ void setup()
   Serial.println("NAV_SOURCE=SIM: skipping QMC5883L init, simulating nav data");
   tft.drawCentreString("DUMMY DATA MODE", 120, 130, 2);
 #endif
+#if ENABLE_COMPASS
+  Serial.println("ENABLE_COMPASS=1 has no effect here: the simulator supplies the heading");
+#endif
   nav_sim_init();
+#elif !COMPASS_ACTIVE
+  Serial.println("ENABLE_COMPASS=0: no compass, no I2C");
+  tft.drawCentreString("BLE MODE", 120, 130, 2);
 #else
   Wire.begin(2, 1);
   Wire.setClock(50000);
@@ -287,6 +304,7 @@ void setup()
   Wire.write(0x0B);
   if (Wire.endTransmission(false) == 0 && Wire.requestFrom(0x0D, 1) == 1)
   {
+    compassPresent = true;
     byte chipID = Wire.read();
     if (chipID == 0xFF)
     {
@@ -320,7 +338,7 @@ void setup()
   }
   else
   {
-    Serial.println("⚠ QMC5883L not responding");
+    Serial.println("⚠ QMC5883L not responding: compass marked absent, not polled");
     tft.drawCentreString("QMC ERR", 120, 130, 1);
   }
 #endif // NAV_SOURCE != NAV_SOURCE_BLE
@@ -393,8 +411,11 @@ void loop()
                   0, 0, 0, deviceConnected);
   }
 #else
+#if COMPASS_ACTIVE
   updateCompass();
+#endif
 
+  // Old debug screen only; heading and X/Y/Z stay 0 without a compass.
   static uint32_t lastUpdate = 0;
   if (millis() - lastUpdate >= 500)
   {
