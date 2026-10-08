@@ -73,7 +73,7 @@ extern "C"
         uint8_t schematic_point_count;
         nav_side_road_t side_roads[NAV_SIDE_ROADS_MAX];       // roads around the route, same coords
         uint8_t side_road_count;
-        bool ble_connected; // placeholder, always false in dummy mode
+        bool ble_connected; // link to the phone app up (NAV_SOURCE_BLE); false when simulated
     } nav_data_t;
 
     // Resets internal simulator state. Call once from setup().

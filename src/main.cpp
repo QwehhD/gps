@@ -6,12 +6,15 @@
 #include <BLEServer.h>
 #include <BLEUtils.h>
 #include <BLE2902.h>
+#include <esp_heap_caps.h>
 #include <lvgl.h>
 #include "../ui.h"
 #include "../screens/ui_watch_digital.h"
 #include "nav_sim.h"
 #include "nav_source.h"
 #include "nav_codec.h"
+#include "nav_frag.h"
+#include "nav_rx.h"
 
 // Forward declarations for LVGL port
 extern void lv_port_disp_init(void);
@@ -19,6 +22,7 @@ extern "C" void ui_update_gps(double lat, double lon, float speed, float heading
 extern "C" void ui_update_nav_heading(float bearing_deg);
 extern "C" void ui_update_nav_info(const nav_data_t *nav);
 extern "C" void ui_update_nav_display(const nav_data_t *nav);
+extern "C" void ui_update_nav_signal(bool has_signal);
 
 TFT_eSPI tft = TFT_eSPI();
 Adafruit_NeoPixel pixels(1, 48, NEO_GRB + NEO_KHZ800);
@@ -47,7 +51,7 @@ CompassData compassData;
 // BLE variables
 BLEServer *pServer = NULL;
 BLECharacteristic *pTxCharacteristic = NULL;
-bool deviceConnected = false;
+volatile bool deviceConnected = false; // set by the BLE task, read by loop()
 
 #define SERVICE_UUID "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
 #define CHARACTERISTIC_RX "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -58,11 +62,17 @@ class MyServerCallbacks : public BLEServerCallbacks
   void onConnect(BLEServer *pServer)
   {
     deviceConnected = true;
+#if NAV_SOURCE == NAV_SOURCE_BLE
+    nav_rx_on_connect();
+#endif
     Serial.println("✓ BLE Client connected");
   }
   void onDisconnect(BLEServer *pServer)
   {
     deviceConnected = false;
+#if NAV_SOURCE == NAV_SOURCE_BLE
+    nav_rx_on_disconnect();
+#endif
     Serial.println("⚠ BLE Client disconnected");
     pServer->getAdvertising()->start();
   }
@@ -83,6 +93,16 @@ class MyCharacteristicCallbacks : public BLECharacteristicCallbacks
   void onWrite(BLECharacteristic *pCharacteristic)
   {
     std::string value = pCharacteristic->getValue();
+    const uint8_t *bytes = (const uint8_t *)value.data();
+    if (value.length() > 0 && bytes[0] == NAV_FRAG_TYPE)
+    {
+      // Binary nav frames (nav_frag.h), several per message: never printed.
+      // Only NAV_SOURCE_BLE shows them; the simulated sources ignore them.
+#if NAV_SOURCE == NAV_SOURCE_BLE
+      nav_rx_on_frame(bytes, value.length());
+#endif
+      return;
+    }
     if (value.length() > 0)
     {
       String data = String((char *)value.c_str());
@@ -162,14 +182,17 @@ void updateCompass()
 #endif // NAV_SOURCE == NAV_SOURCE_BLE
 
 #if NAV_SOURCE == NAV_SOURCE_LOOPBACK
-// Sends the simulator output through the BLE wire format (encode, then
-// decode) so the display shows exactly what would survive the trip from the
-// phone. Logs the packet sizes every few seconds.
+// Sends the simulator output through the BLE wire format (encode, split
+// into frames of the smallest BLE write, reassemble, decode) so the display
+// shows exactly what would survive the trip from the phone. Logs the packet
+// sizes every few seconds.
 static const nav_data_t *nav_loopback(const nav_data_t *sim)
 {
   static uint8_t packet[NAV_MSG_MAX_SIZE];
+  static nav_frag_t frag; // zeroed, same as nav_frag_init()
   static nav_data_t decoded;
   static uint8_t tx_seq = 0;
+  static uint8_t max_frames = 0;
   static uint32_t packets = 0;
   static uint32_t errors = 0;
   static uint64_t total_bytes = 0;
@@ -178,8 +201,22 @@ static const nav_data_t *nav_loopback(const nav_data_t *sim)
   static uint32_t last_log_packets = 0;
 
   size_t len = nav_encode(sim, packet, sizeof(packet), tx_seq);
+  uint8_t frames = nav_frag_count(len, NAV_FRAG_MIN_FRAME);
+  const uint8_t *msg = nullptr;
+  size_t msg_len = 0;
+  for (uint8_t i = 0; i < frames; i++)
+  {
+    uint8_t frame[NAV_FRAG_MIN_FRAME];
+    size_t frame_len = nav_frag_build(packet, len, tx_seq, NAV_FRAG_MIN_FRAME, i, frame, sizeof(frame));
+    nav_frag_push(&frag, frame, frame_len, &msg, &msg_len);
+  }
+  if (frames > max_frames)
+  {
+    max_frames = frames;
+  }
   uint8_t rx_seq = 0;
-  nav_decode_status_t status = nav_decode(packet, len, &decoded, &rx_seq);
+  nav_decode_status_t status = msg != nullptr ? nav_decode(msg, msg_len, &decoded, &rx_seq)
+                                              : NAV_DECODE_ERR_TRUNCATED;
   if (status != NAV_DECODE_OK || rx_seq != tx_seq)
   {
     // decoded keeps the last good packet.
@@ -198,10 +235,11 @@ static const nav_data_t *nav_loopback(const nav_data_t *sim)
   uint32_t now = millis();
   if (now - last_log_ms >= 5000)
   {
-    Serial.printf("loopback: %lu packets (%lu/s), avg %.1f B, max %u B, errors %lu\n",
+    Serial.printf("loopback: %lu packets (%lu/s), avg %.1f B, max %u B (%u frames of %u B), errors %lu\n",
                   (unsigned long)packets,
                   (unsigned long)((packets - last_log_packets) * 1000UL / (now - last_log_ms)),
-                  (double)total_bytes / packets, (unsigned)max_bytes, (unsigned long)errors);
+                  (double)total_bytes / packets, (unsigned)max_bytes, (unsigned)max_frames,
+                  (unsigned)NAV_FRAG_MIN_FRAME, (unsigned long)errors);
     last_log_ms = now;
     last_log_packets = packets;
   }
@@ -287,6 +325,10 @@ void setup()
   }
 #endif // NAV_SOURCE != NAV_SOURCE_BLE
 
+#if NAV_SOURCE == NAV_SOURCE_BLE
+  nav_rx_init(); // the queue must exist before the first BLE callback
+#endif
+
   // BLE Setup (Tetap sesuai aslinya)
   BLEDevice::init("GPS_Tracker_BLE");
   BLEDevice::setMTU(517); 
@@ -299,11 +341,23 @@ void setup()
   pRxCharacteristic->setCallbacks(new MyCharacteristicCallbacks());
   pService->start();
   BLEDevice::startAdvertising();
+  Serial.printf("BLE stack: %s, internal heap free %u B after BLE init\n",
+#if defined(CONFIG_BT_NIMBLE_ENABLED)
+                "NimBLE",
+#elif defined(CONFIG_BT_BLUEDROID_ENABLED)
+                "Bluedroid",
+#else
+                "unknown",
+#endif
+                (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 
   // Initialize LVGL
   lv_init();
   lv_port_disp_init();
   ui_init();
+#if NAV_SOURCE == NAV_SOURCE_BLE
+  ui_update_nav_signal(false); // nothing received yet
+#endif
 
   Serial.println("✓ Setup complete!");
 }
@@ -349,6 +403,38 @@ void loop()
                   gpsData.speed, compassData.heading,
                   compassData.x, compassData.y, compassData.z, deviceConnected);
   }
+
+  // Newest nav data from the BLE task. With the link down, or no valid
+  // message for NAV_RX_STALE_MS, the display switches to "no signal" rather
+  // than showing old guidance as if it still held. There is no fallback to
+  // the simulator.
+  static nav_data_t nav;
+  uint32_t age_ms = 0;
+  bool have = nav_rx_latest(&nav, &age_ms);
+  bool connected = deviceConnected;
+  bool fresh = have && connected && age_ms <= NAV_RX_STALE_MS;
+  ui_update_nav_signal(fresh);
+  if (have)
+  {
+    nav.ble_connected = connected;
+    ui_update_nav_display(&nav);
+  }
+
+  static bool was_fresh = false;
+  if (fresh != was_fresh)
+  {
+    was_fresh = fresh;
+    if (fresh)
+    {
+      Serial.println("nav: signal back");
+    }
+    else
+    {
+      Serial.printf("nav: no signal (%s)\n",
+                    !connected ? "link down" : !have ? "no data yet" : "no valid message for 3 s");
+    }
+  }
+  nav_rx_log_stats(connected);
 #endif // NAV_SOURCE != NAV_SOURCE_BLE
 
   // Short sleep: LVGL's timers only run when loop() comes back here, so a
