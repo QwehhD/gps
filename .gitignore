@@ -5,3 +5,8 @@
 .vscode/ipch
 
 ATURAN-KERJA.md
+
+# Python (tools/ble_sender)
+__pycache__/
+.pytest_cache/
+.venv/
