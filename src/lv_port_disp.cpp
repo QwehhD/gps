@@ -52,8 +52,11 @@ static volatile bool frame_sent = true;
 #define LCD_CMD_RAMWR 0x2C
 #define LCD_CMD_RAMWR_CONTINUE 0x3C
 
-// 1 = print frame rate and render/flush timings to Serial every 2 s.
+// 1 = print frame rate and render/flush timings to Serial every 2 s. Can
+// also be set per build with -DLV_PORT_PERF_LOG=1.
+#ifndef LV_PORT_PERF_LOG
 #define LV_PORT_PERF_LOG 0
+#endif
 
 #if LV_PORT_PERF_LOG
 static uint32_t perf_render_start_us;
@@ -64,6 +67,7 @@ static uint32_t perf_px;
 static uint32_t perf_window_ms;
 static uint32_t perf_last_start_us;
 static uint32_t perf_max_gap_us;
+static uint32_t perf_max_render_us;
 
 static void perf_render_start_cb(lv_event_t *e)
 {
@@ -79,18 +83,23 @@ static void perf_render_start_cb(lv_event_t *e)
 static void perf_render_ready_cb(lv_event_t *e)
 {
     (void)e;
-    perf_render_us += micros() - perf_render_start_us;
+    uint32_t render_us = micros() - perf_render_start_us;
+    perf_render_us += render_us;
+    if (render_us > perf_max_render_us)
+    {
+        perf_max_render_us = render_us;
+    }
     perf_frames++;
     uint32_t now = millis();
     if (now - perf_window_ms >= 2000)
     {
         float secs = (now - perf_window_ms) / 1000.0f;
-        Serial.printf("[perf] %.1f fps | longest gap %.1f ms | render+flush %.1f ms/frame (flush %.1f ms) | %lu px/frame\n",
+        Serial.printf("[perf] %.1f fps | longest gap %.1f ms | render+flush %.1f ms/frame, max %.1f (flush %.1f ms) | %lu px/frame\n",
                       perf_frames / secs, perf_max_gap_us / 1000.0f,
-                      perf_frames ? perf_render_us / 1000.0f / perf_frames : 0.0f,
+                      perf_frames ? perf_render_us / 1000.0f / perf_frames : 0.0f, perf_max_render_us / 1000.0f,
                       perf_frames ? perf_flush_us / 1000.0f / perf_frames : 0.0f,
                       perf_frames ? (unsigned long)(perf_px / perf_frames) : 0UL);
-        perf_render_us = perf_flush_us = perf_frames = perf_px = perf_max_gap_us = 0;
+        perf_render_us = perf_flush_us = perf_frames = perf_px = perf_max_gap_us = perf_max_render_us = 0;
         perf_window_ms = now;
     }
 }
