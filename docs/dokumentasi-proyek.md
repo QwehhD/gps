@@ -1,6 +1,7 @@
 # Butamap GPS — Dokumentasi Proyek & Persiapan Data Asli
 
-Status per 6 Oktober 2026, commit `9ae1e50` di `main`.
+Status per 8 Oktober 2026: `main` (`11d0027`) ditambah fase 1 jalur data
+asli (format biner `'N'`, unit test host, mode loopback).
 
 Dokumen ini berdiri sendiri: ditulis supaya bisa dibaca tanpa membuka repo,
 sebagai bahan untuk merencanakan peralihan dari data simulasi ke data asli
@@ -16,11 +17,13 @@ Butamap GPS adalah layar navigasi turn-by-turn untuk dashboard motor: modul
 ESP32-S3 dengan layar bulat 240×240 (GC9A01). Rencananya app HP melakukan
 routing dan mengirim data navigasi lewat BLE; ESP32 hanya menampilkan.
 
-Saat ini firmware berjalan dalam **mode data dummy**: simulator di ESP32
-membuat rute acak tanpa ujung dan "mengendarai" rider di sepanjangnya,
-sehingga seluruh tampilan bisa diuji di layar asli tanpa sensor atau app.
-Layar navigasinya sudah lengkap dan mulus (40 fps stabil, diukur di board);
-yang belum ada adalah sumber data asli.
+Saat ini firmware berjalan dengan **data simulasi** (`NAV_SOURCE_SIM`,
+bawaan): simulator di ESP32 membuat rute acak tanpa ujung dan
+"mengendarai" rider di sepanjangnya, sehingga seluruh tampilan bisa diuji
+di layar asli tanpa sensor atau app. Layar navigasinya sudah lengkap dan
+mulus (40 fps stabil, diukur di board). Format pesan BLE biner sudah
+diimplementasikan dan terbukti lewat mode loopback; yang belum ada adalah
+penerima BLE yang memakainya dan app HP pengirimnya.
 
 ## 2. Status singkat
 
@@ -31,11 +34,14 @@ yang belum ada adalah sumber data asli.
 | Performa render (40 fps stabil, frame 10–17 ms) | Selesai, diukur di board |
 | Simulator data dummy (rute acak, jalan samping, belokan) | Selesai |
 | Kontrak data `nav_data_t` (antarmuka sumber data → UI) | Selesai |
-| BLE server (Nordic UART Service) | Jalan, tapi hanya memahami `GPS:lat,lon,speed` |
-| Format payload navigasi lewat BLE | **Belum** (ada usulan, bagian 13) |
+| Pilihan sumber data `NAV_SOURCE` (SIM / LOOPBACK / BLE) | Selesai, tanpa fallback runtime ke simulator (bagian 6) |
+| Format payload navigasi lewat BLE (pesan biner `'N'`) | Selesai: encoder/decoder defensif `src/nav_codec.c` (bagian 13.4) |
+| Unit test host (`pio test -e native`) | Selesai: 31 test (30 codec, 1 simulator lewat codec); juga lolos saat dijalankan manual dengan ASan/UBSan |
+| Mode loopback (simulator → encode → decode → layar) | Selesai, diuji di board: 0 error, 40 fps, tampilan sama dengan SIM |
+| BLE server (Nordic UART Service) | Jalan, tapi baru memahami `GPS:lat,lon,speed`; parser `'N'` **belum** (fase 2) |
 | App HP (routing, konversi koordinat, kirim BLE) | **Belum ada** |
-| Pengisian `nav_data_t` dari data asli | **Belum** — di mode non-dummy layar navigasi belum diberi data sama sekali |
-| Kompas QMC5883L | Pembacaan mentah jalan (mode non-dummy), belum dikalibrasi, belum dipakai layar navigasi |
+| Pengisian `nav_data_t` dari data asli | **Belum** — di `NAV_SOURCE_BLE` layar navigasi belum diberi data sama sekali (fase 2) |
+| Kompas QMC5883L | Pembacaan mentah jalan (`NAV_SOURCE_BLE`), belum dikalibrasi, belum dipakai layar navigasi |
 | IMU (MPU6050) | Belum ada di hardware |
 
 ## 3. Hardware
@@ -81,12 +87,23 @@ cabut-colok USB. Port bisa berganti antara `ttyACM0` dan `ttyACM1`.
 - Pemakaian memori saat ini: RAM 78% (±255 KB dari 320 KB; termasuk buffer
   layar penuh 115 KB), flash 43,7%.
 
-Build dan upload:
+Build, upload, dan test:
 
 ```bash
-pio run                                   # build
+pio run                                   # build firmware
 pio run -t upload --upload-port /dev/ttyACM0
 pio device monitor -b 115200              # log serial
+pio test -e native                        # unit test di host (gcc + Unity)
+```
+
+`pio run` hanya membangun firmware (`default_envs`). Env `native` khusus
+test host; env board memakai `test_ignore = *`, jadi `pio test` tanpa
+`-e native` tidak menjalankan apa pun dan tidak meng-upload ke board.
+
+Sumber data per build tanpa mengubah berkas (memicu build ulang penuh):
+
+```bash
+env PLATFORMIO_BUILD_FLAGS="-DNAV_SOURCE=NAV_SOURCE_LOOPBACK" pio run -t upload --upload-port /dev/ttyACM0
 ```
 
 Log performa: ubah `LV_PORT_PERF_LOG` di `src/lv_port_disp.cpp` menjadi `1`;
@@ -96,9 +113,13 @@ FPS, jeda terlama antar-frame, dan waktu render dicetak ke serial tiap 2 detik.
 
 | Berkas | Isi |
 | --- | --- |
-| `src/main.cpp` | `setup()`/`loop()`, BLE server, pembacaan QMC5883L (mode non-dummy), pemilihan sumber data lewat `USE_DUMMY_DATA` |
-| `src/nav_sim.h` | **Kontrak data** `nav_data_t` + API simulator; flag `USE_DUMMY_DATA` |
+| `src/main.cpp` | `setup()`/`loop()`, BLE server, pembacaan QMC5883L (`NAV_SOURCE_BLE`), jalur loopback dan log ukuran paket |
+| `src/nav_source.h` | Pilihan sumber data `NAV_SOURCE` (SIM / LOOPBACK / BLE) |
+| `src/nav_sim.h` | **Kontrak data** `nav_data_t` + API simulator |
 | `src/nav_sim.cpp` | Simulator rute dummy |
+| `src/nav_codec.h/.c` | Encoder/decoder biner pesan `'N'` (C murni, tanpa Arduino/LVGL) |
+| `test/test_nav_codec/` | Unit test codec: round-trip, nilai batas, paket rusak, korupsi acak |
+| `test/test_nav_loopback/` | Simulator lewat codec, dibandingkan dengan keluaran simulator langsung |
 | `src/lv_port_disp.cpp` | Port layar LVGL: mode DIRECT, kirim frame lewat DMA `spi_master`, tick dari `millis()`, log performa |
 | `src/ui_init.cpp` | Memilih layar awal; fungsi `ui_update_*` yang dipanggil `main.cpp` |
 | `screens/ui_nav_display.c/.h` | Layar navigasi (semua fitur di bagian 7–8) |
@@ -122,19 +143,33 @@ void ui_update_gps(double lat, double lon, float speed, float heading,
 
 ## 6. Alur data saat ini
 
+Sumber data dipilih saat kompilasi dengan `NAV_SOURCE` di
+`src/nav_source.h` (menggantikan `USE_DUMMY_DATA`):
+
 ```
-Mode dummy (USE_DUMMY_DATA 1, yang aktif sekarang):
+NAV_SOURCE_SIM (bawaan):
 
   loop() ─► nav_sim_update(millis()) ─► nav_data_t ─► ui_update_nav_display()
                                                    └► ui_update_nav_info() (debug, 200 ms)
 
-  BLE "GPS:lat,lon,speed" ─► gpsData (lat/lon/speed) ─► hanya label layar debug
+NAV_SOURCE_LOOPBACK (uji format biner tanpa radio):
 
-Mode non-dummy (USE_DUMMY_DATA 0):
+  loop() ─► nav_sim_update() ─► nav_encode() ─► paket 'N' ─► nav_decode() ─► nav_data_t ─► (sama seperti SIM)
+            serial tiap 5 detik: "loopback: … packets (…/s), avg … B, max … B, errors …"
+
+NAV_SOURCE_BLE:
 
   loop() ─► updateCompass() (QMC5883L) ─► ui_update_gps() (layar debug saja)
-  !! ui_update_nav_display() tidak dipanggil: layar navigasi tidak diberi data.
+  !! ui_update_nav_display() belum dipanggil: layar navigasi tidak diberi data (fase 2).
+
+Semua mode:
+
+  BLE "GPS:lat,lon,speed" ─► gpsData (lat/lon/speed) ─► hanya label layar debug
 ```
+
+**Tidak ada fallback otomatis ke simulator saat runtime**: rute palsu di
+layar saat koneksi putus berbahaya di jalan. Nilai `NAV_SOURCE` yang salah
+ketik gagal dikompilasi (`#error`).
 
 Layar navigasi **hanya** membaca `nav_data_t`. Mengganti sumber data cukup
 dengan mengisi struct yang sama dari sumber lain, tanpa menyentuh kode UI.
@@ -185,10 +220,10 @@ typedef struct {
 | `side_roads`, `side_road_count` | Ya | Cabang jalan di sekitar rute (0–8 polyline, 2–4 titik) |
 | `maneuver` | Ya | Ikon di panel bawah |
 | `distance_to_turn_m` | Ya | Angka jarak + busur progres |
-| `bearing_deg` | Tidak (hanya jarum di layar debug) | Heading kompas, 0 = utara |
+| `bearing_deg` | Tidak (hanya jarum di layar debug) | Heading kompas, 0 = utara. Tidak ikut pesan `'N'` |
 | `speed_kmh` | Tidak (hanya layar debug) | Kecepatan |
 | `total_distance_m` | Tidak | Sisa jarak rute |
-| `ble_connected` | Tidak | Placeholder status link app HP |
+| `ble_connected` | Tidak | Placeholder status link app HP. Tidak ikut pesan `'N'` |
 
 ### Sistem koordinat garis rute dan jalan samping
 
@@ -322,6 +357,7 @@ sensor dan data BLE mentah.
 | 5 Okt 2026 | Layar navigasi turn-by-turn (rute, panel, ikon, jarak, busur progres); tick LVGL diperbaiki; panel kubah; belokan berganti mulus; rute menerus dengan beberapa belokan sekaligus; jalan samping; panah 3D; font lebih tebal; rambu batas kecepatan dihapus |
 | 5 Okt 2026 | Performa: DMA, refresh 25 ms, `-O2` → 40 fps stabil; layar yang tertahan di teks pembuka diperbaiki |
 | 6 Okt 2026 | Jalan samping dua garis, bisa bengkok, menyatu dengan rute bertepi abu (mulut persimpangan); LVGL dikunci 9.6.0; mode DIRECT + DMA `spi_master`; rasterizer peta → frame terberat 17 ms |
+| 8 Okt 2026 | Fase 1 jalur data asli: format biner pesan `'N'` (encoder/decoder defensif), 31 unit test host, `NAV_SOURCE` menggantikan `USE_DUMMY_DATA`, mode loopback diuji di board (0 error, 40 fps, sama dengan SIM) |
 
 ## 13. Persiapan data asli
 
@@ -393,48 +429,80 @@ Yang sudah ada di `src/main.cpp`:
 - MTU diminta 517 (payload maks. 514 byte per write). Catatan: iOS biasanya
   menegosiasikan MTU lebih kecil (±185), jadi payload bisa terbatas ±182
   byte.
-- Pesan yang dikenali: `GPS:lat,lon,speed` (mengisi lat/lon/speed untuk
-  layar debug). `ROUTE:` hanya dicatat ke log.
+- Pesan yang dikenali penerima saat ini: `GPS:lat,lon,speed` (mengisi
+  lat/lon/speed untuk layar debug). `ROUTE:` hanya dicatat ke log. Pesan
+  `'N'` di bawah belum diterima lewat BLE (fase 2).
 
-Perkiraan ukuran satu update navigasi lengkap (32 titik rute + 8 jalan
-samping × 4 titik):
-
-- **Teks** (rencana awal `NAV:bearing,jarak,tipe,total,speed,titik[],jalan[]`,
-  koordinat satu desimal): ±750–1000 karakter → harus dipecah ke beberapa
-  write.
-- **Biner** (usulan): koordinat `int16` dalam 1/16 satuan → ±280 byte → muat
-  satu write di Android (MTU 517); di iOS perlu dipecah atau dikurangi.
-
-Usulan format biner (belum diimplementasikan, little-endian):
+**Format biner pesan `'N'`** — sudah diimplementasikan di
+`src/nav_codec.h/.c`, satu pesan = satu jendela rute lengkap,
+little-endian:
 
 | Offset | Ukuran | Field |
 | --- | --- | --- |
 | 0 | 1 | Tipe pesan (`'N'` = 0x4E) |
 | 1 | 1 | Nomor urut (wrap 0–255; untuk deteksi pesan hilang/berurutan) |
-| 2 | 1 | `maneuver` |
-| 3 | 1 | Flags (bit 0 = rute valid) |
+| 2 | 1 | `maneuver` (0–3) |
+| 3 | 1 | Flags: bit 0 = rute valid, wajib 1 tepat saat N ≥ 2; bit 1–7 cadangan (dikirim 0, diabaikan penerima) |
 | 4 | 2 | `distance_to_turn_m` (uint16, meter) |
 | 6 | 2 | `total_distance_m` (uint16, ×10 m) |
 | 8 | 1 | `speed_kmh` (uint8) |
-| 9 | 1 | Jumlah titik rute N (≤ 32) |
+| 9 | 1 | Jumlah titik rute N (0–32) |
 | 10 | 4·N | Titik rute: `int16 x`, `int16 y` (1/16 satuan) |
-| … | 1 | Jumlah jalan samping M (≤ 8) |
-| … | per jalan: 1 + 4·K | K titik (≤ 4), lalu K × (`int16 x`, `int16 y`) |
+| … | 1 | Jumlah jalan samping M (0–8) |
+| … | per jalan: 1 + 4·K | K titik (2–4), lalu K × (`int16 x`, `int16 y`) |
+
+- **Kuantisasi koordinat 1/16 satuan**: dibulatkan ke terdekat, jadi error
+  maksimal **1/32 satuan ≈ 0,125 px** (4 px per satuan). Rentang `int16`
+  = ±2048 satuan. Jarak dibulatkan ke 1 m (sisa rute ke 10 m), kecepatan
+  ke 1 km/h.
+- **Ukuran**: 10 + 4·N + 1 + Σ(1 + 4·K) byte. Minimal 11 (tanpa rute),
+  maksimal **275** (32 titik + 8 jalan × 4 titik). Data simulator: rata-rata
+  ±171–179 byte, terbesar 199 byte (diukur di board; host: rata-rata
+  176,4, maksimal 195 dari 40.000 paket). Format teks `NAV:…` rencana awal
+  (±750–1000 karakter, harus dipecah) ditinggalkan.
+- **MTU**: Android dengan MTU 517 memuat paket terbesar dalam satu write.
+  iOS (payload ±182 byte) memuat paket rata-rata, tapi tidak yang terbesar
+  — perlu dipecah atau dikurangi bila app iOS.
+- **Encoder** menjepit nilai di luar rentang (negatif → 0, terlalu besar →
+  maksimum field, NaN → 0), melewati jalan samping < 2 titik, dan tidak
+  pernah menulis paket yang ditolak decodernya sendiri.
+- **Decoder** memvalidasi seluruh paket sebelum menulis apa pun: tipe
+  `'N'`, panjang total harus pas (kurang = `TRUNCATED`, lebih =
+  `LENGTH`), maneuver 0–3, N ≤ 32, M ≤ 8, K 2–4, bit rute valid cocok
+  dengan N. Paket rusak ditolak dengan kode error dan `nav_data_t` tujuan
+  tidak berubah. `bearing_deg` dan `ble_connected` tidak dikirim (diisi
+  0/`false`). Tidak ada checksum: link layer BLE sudah punya CRC.
+- Pesan teks lama `GPS:`/`ROUTE:` diawali huruf lain, jadi tidak bentrok
+  dengan `'N'`.
+
+Rincian kode error dan aturan encoder ada di `docs/navigation-protocol.md`
+bagian 1.
 
 ### 13.5 Pekerjaan firmware untuk data asli
 
-1. Parser pesan navigasi di callback BLE (`MyCharacteristicCallbacks::onWrite`).
+Fase 1 (selesai): codec biner `'N'` + unit test host + mode loopback, dan
+`USE_DUMMY_DATA` diganti pilihan compile-time `NAV_SOURCE`
+(`SIM` / `LOOPBACK` / `BLE`). **Diputuskan tidak ada pilihan runtime ke
+dummy** (mis. saat belum ada koneksi BLE): rute palsu di layar saat
+koneksi putus berbahaya di jalan.
+
+Fase 2 (berikutnya):
+
+1. Parser pesan `'N'` di callback BLE (`MyCharacteristicCallbacks::onWrite`)
+   memakai `nav_decode()`; `GPS:` tetap untuk layar debug.
 2. **Pengaman antar-task**: callback BLE berjalan di task Bluetooth, sedangkan
-   `loop()` (yang memanggil UI) di task Arduino. Isi `nav_data_t` cadangan di
-   callback, lalu tukar/salin di bawah mutex atau critical section; `loop()`
-   mengambil salinan terbaru sebelum memanggil `ui_update_nav_display()`.
-3. Di mode non-dummy, panggil `ui_update_nav_display()` tiap `loop()` dengan
-   data terbaru (saat ini tidak dipanggil sama sekali).
-4. Tangani putus koneksi dan data basi (mis. tidak ada update > 2–3 detik):
-   isi `ble_connected`, dan tentukan tampilan "tidak ada sinyal" (belum ada
-   di UI; sekarang rute hanya disembunyikan kalau titiknya < 2).
-5. Ubah `USE_DUMMY_DATA` menjadi `0`, atau jadikan pilihan saat runtime
-   (mis. dummy saat belum ada koneksi BLE).
+   `loop()` (yang memanggil UI) di task Arduino. Callback menulis hasil
+   decode ke queue FreeRTOS panjang 1 (`xQueueOverwrite`); `loop()`
+   mengambil salinan terbaru (`xQueuePeek`) sebelum memanggil
+   `ui_update_nav_display()`. Task BLE tidak menyentuh LVGL.
+3. Di `NAV_SOURCE_BLE`, panggil `ui_update_nav_display()` tiap `loop()`
+   dengan data terbaru (saat ini tidak dipanggil sama sekali).
+4. Tangani putus koneksi dan data basi (> 3 detik tanpa paket valid): isi
+   `ble_connected`, hitung paket hilang dari nomor urut, dan tampilan
+   "tidak ada sinyal" (belum ada di UI; sekarang rute hanya disembunyikan
+   kalau titiknya < 2).
+5. Pengirim uji di laptop (`tools/ble_sender/`, Python + bleak), termasuk
+   implementasi referensi konversi koordinat bagian 13.2.
 
 ### 13.6 Heading
 
@@ -454,11 +522,11 @@ jauh di bawah kapasitas BLE.
 
 ### 13.8 Keputusan yang masih terbuka
 
-- Platform app HP (Android / iOS / Flutter) dan batas MTU-nya.
+- Platform app HP (Android / iOS / Flutter) dan batas MTU-nya (paket `'N'`
+  terbesar 275 byte tidak muat satu write di iOS, bagian 13.4).
 - Penyedia routing: ORS (tanpa cabang persimpangan) atau Mapbox (dengan
   `intersections`).
 - Skala meter per satuan: tetap (mis. 15 m) atau zoom mengikuti kecepatan.
-- Format payload: teks (mudah di-debug) atau biner (muat satu write).
 - Sumber heading untuk konversi: arah rute, course GPS, atau kompas HP.
 - Jenis maneuver tambahan: belok sedikit, bundaran, tiba di tujuan, keluar
   jalan tol — perlu ikon dan nilai enum baru.
@@ -485,5 +553,5 @@ jauh di bawah kapasitas BLE.
   commit (`feat(ui): …`, `fix(display): …`, `docs: …`).
 - Perubahan dari luar folder utama diserahkan sebagai satu patch relatif ke
   `main`, diterapkan dengan `git apply`, lalu dibagi ke commit.
-- Sebelum menyarankan commit, build harus lolos (`pio run`, cek kode
-  keluarnya).
+- Sebelum menyarankan commit, build dan test harus lolos (`pio run` dan
+  `pio test -e native`, cek kode keluarnya).

@@ -3,39 +3,81 @@
 Dokumen ini mencatat desain protokol navigasi untuk dashboard motor —
 supaya keputusan desain (format payload, orientasi garis skematik, opsi
 junction view) tidak hilang begitu implementasi sensor/BLE beneran mulai
-dikerjakan. Sebagian besar yang didokumentasikan di sini **belum
-diimplementasikan**; yang jalan sekarang hanya mode simulasi software
-(lihat bagian "Mode Dummy Data Saat Ini").
+dikerjakan. Yang sudah jalan: mode simulasi software dan **format pesan
+biner `'N'`** (encoder/decoder, diuji di host dan lewat mode loopback di
+board). Yang belum: penerima pesan itu di callback BLE dan app HP
+pengirimnya (lihat bagian "Mode Sumber Data").
 
-## 1. Format Payload BLE (Rencana, Belum Diimplementasikan)
+## 1. Format Payload BLE: pesan biner `'N'`
 
-App HP (belum ada) akan melakukan routing (via OpenRouteService atau
-sejenisnya), lalu mengirim hasilnya ke ESP32-S3 lewat BLE dalam bentuk
-string terstruktur:
+App HP (belum ada) melakukan routing (via OpenRouteService atau
+sejenisnya), mengubah geometri rute ke koordinat lokal heading-up, lalu
+mengirim hasilnya ke ESP32-S3 lewat BLE. **Satu pesan = satu jendela rute
+lengkap**, cukup untuk mengisi seluruh `nav_data_t` yang dibaca layar.
+Diimplementasikan di `src/nav_codec.h/.c` (C murni, tanpa Arduino/LVGL).
 
-```
-NAV:bearing,jarak_ke_belok,tipe_belok,jarak_total,speed,titik_garis[],jalan_samping[]
-```
+Rencana awal berupa teks (`NAV:bearing,jarak,tipe,total,speed,titik[],jalan[]`)
+ditinggalkan: dengan 32 titik rute dan 8 jalan samping panjangnya
+±750–1000 karakter dan harus dipecah ke beberapa write, sedangkan versi
+biner maksimal 275 byte dan muat satu write di MTU 517.
 
-Rincian field:
+Little-endian:
 
-| Field           | Tipe          | Satuan   | Keterangan                                                                 |
-| --------------- | ------------- | -------- | --------------------------------------------------------------------------- |
-| `bearing`       | float         | derajat  | Heading kompas saat ini, 0-359.9, 0 = utara                                 |
-| `jarak_ke_belok`| float         | meter    | Jarak tersisa ke maneuver berikutnya, hitung mundur ke 0                    |
-| `tipe_belok`    | enum/int      | -        | Jenis maneuver berikutnya: lurus / belok kiri / belok kanan / putar balik   |
-| `jarak_total`   | float         | meter    | Sisa jarak untuk keseluruhan rute (bukan cuma sampai belokan berikutnya)    |
-| `speed`         | float         | km/h     | Kecepatan saat ini                                                          |
-| `titik_garis[]` | array of x,y  | satuan   | Titik-titik garis rute di sekitar rider, maks. 32 (lihat bagian 2)          |
-| `jalan_samping[]` | array of polyline (maks. 4 titik x,y) | satuan | Cabang jalan di sekitar rute, maks. 8 (lihat bagian 3) |
+| Offset | Ukuran | Field |
+| --- | --- | --- |
+| 0 | 1 | Tipe pesan, `'N'` (0x4E) |
+| 1 | 1 | Nomor urut, wrap 255 → 0 (deteksi pesan hilang/tertukar) |
+| 2 | 1 | `maneuver` (`nav_maneuver_t`, 0–3) |
+| 3 | 1 | Flags: bit 0 = rute valid (wajib 1 tepat saat N ≥ 2), bit 1–7 cadangan (dikirim 0, diabaikan penerima) |
+| 4 | 2 | `distance_to_turn_m`, uint16, meter |
+| 6 | 2 | `total_distance_m`, uint16, ×10 m |
+| 8 | 1 | `speed_kmh`, uint8 |
+| 9 | 1 | Jumlah titik rute N (0–32) |
+| 10 | 4·N | Titik rute: `int16 x`, `int16 y`, dalam 1/16 satuan |
+| … | 1 | Jumlah jalan samping M (0–8) |
+| … | per jalan: 1 + 4·K | Jumlah titik K (2–4), lalu K × (`int16 x`, `int16 y`) |
 
-Payload ini adalah **rencana desain**, bukan implementasi aktif — koneksi
-BLE yang sudah berjalan di `src/main.cpp` saat ini masih memakai format
-lama (`GPS:lat,lon,speed` dan `ROUTE:...`) untuk keperluan lain, dan belum
-diganti ke format `NAV:` di atas. Field-field ini sengaja dibuat 1:1
-dengan struct `nav_data_t` di `src/nav_sim.h` (lihat bagian 5) supaya
-nanti tinggal parsing string BLE ke struct yang sama, tanpa mengubah kode
-UI sama sekali.
+Panjang paket = 10 + 4·N + 1 + Σ(1 + 4·K): minimal 11 byte (tanpa rute),
+maksimal 275 byte (32 titik + 8 jalan × 4 titik). Data simulator rata-rata
+±171–179 byte, terbesar 199 byte (diukur di board dan di host).
+
+**Kuantisasi.** Koordinat dibulatkan ke 1/16 satuan terdekat, jadi error
+maksimal 1/32 satuan = **0,125 px** di layar (4 px per satuan). Rentang
+`int16` mencakup ±2048 satuan, jauh di atas jendela rute (−12…+80).
+Jarak dibulatkan ke 1 m (sisa rute ke 10 m), kecepatan ke 1 km/h.
+
+**Encoder** (`nav_encode`) tidak pernah menulis paket yang ditolak
+decodernya sendiri: nilai di luar rentang dijepit (jarak/kecepatan negatif
+→ 0, terlalu besar → maksimum field, koordinat → rentang `int16`, NaN →
+0), jumlah titik dijepit ke maksimum, dan jalan samping dengan < 2 titik
+dilewati (layar juga mengabaikannya). Mengembalikan 0 kalau buffer kurang
+atau `maneuver` bukan nilai enum.
+
+**Decoder** (`nav_decode`) memvalidasi seluruh paket sebelum menulis
+apa pun, jadi paket rusak tidak pernah mengubah `nav_data_t` tujuan dan
+tidak pernah membaca di luar buffer. Paket ditolak dengan kode error bila:
+
+| Kode | Sebab |
+| --- | --- |
+| `NAV_DECODE_ERR_TYPE` | Byte pertama bukan `'N'` |
+| `NAV_DECODE_ERR_TRUNCATED` | Paket berakhir sebelum semua field yang disebut jumlahnya |
+| `NAV_DECODE_ERR_LENGTH` | Ada byte sisa setelah field terakhir (panjang harus pas) |
+| `NAV_DECODE_ERR_MANEUVER` | `maneuver` ≥ 4 |
+| `NAV_DECODE_ERR_FLAGS` | Bit rute valid tidak cocok dengan N ≥ 2 |
+| `NAV_DECODE_ERR_ROUTE_COUNT` | N > 32 |
+| `NAV_DECODE_ERR_SIDE_COUNT` | M > 8 |
+| `NAV_DECODE_ERR_SIDE_POINTS` | K di luar 2–4 |
+| `NAV_DECODE_ERR_ARG` | Pointer `NULL` |
+
+`nav_decode_status_str()` memberi nama singkat untuk log. Tidak ada
+checksum: link layer BLE sudah punya CRC. `bearing_deg` dan
+`ble_connected` tidak ikut dikirim; decoder mengisinya 0/`false` untuk
+diisi pemanggil.
+
+Pesan teks lama (`GPS:lat,lon,speed`, `ROUTE:...`) diawali huruf lain,
+jadi tidak bentrok dengan `'N'`. Penerimanya di `src/main.cpp` masih
+hanya memahami pesan teks itu; parser `'N'` di callback BLE dikerjakan di
+fase berikutnya.
 
 ## 2. Garis Skematik (Schematic Line)
 
@@ -86,20 +128,35 @@ dipilih:
   cabang jalan, bukan cuma satu panah), field ini yang perlu dipakai,
   kemungkinan besar berdampingan dengan atau menggantikan ORS.
 
-## 4. Mode Dummy Data Saat Ini: 100% Simulasi Software
+## 4. Mode Sumber Data (`NAV_SOURCE`)
 
-Firmware saat ini berjalan dalam **mode dummy data penuh**
-(`USE_DUMMY_DATA 1` di `src/nav_sim.h`), yang berarti:
+Sumber data layar navigasi dipilih saat kompilasi lewat `NAV_SOURCE` di
+`src/nav_source.h` (menggantikan `USE_DUMMY_DATA`):
+
+| Nilai | Isi |
+| --- | --- |
+| `NAV_SOURCE_SIM` (bawaan) | Simulator langsung ke UI |
+| `NAV_SOURCE_LOOPBACK` | Simulator → `nav_encode()` → paket `'N'` → `nav_decode()` → UI. Membuktikan format biner tanpa radio; ukuran paket rata-rata/maksimum dicatat ke serial tiap 5 detik |
+| `NAV_SOURCE_BLE` | Data asli dari HP lewat BLE (penerimanya belum ada, lihat bagian 1) |
+
+Ganti bawaannya di `src/nav_source.h`, atau per build lewat
+`-DNAV_SOURCE=NAV_SOURCE_LOOPBACK` di `build_flags`. Nama yang salah ketik
+gagal dikompilasi (`#error`). **Tidak ada fallback otomatis ke simulator
+saat runtime**: rute palsu di layar saat koneksi putus berbahaya di jalan.
+
+Pada `NAV_SOURCE_SIM` dan `NAV_SOURCE_LOOPBACK`, data 100% simulasi software:
 
 - **Tidak ada pembacaan QMC5883L sama sekali.** Kode inisialisasi dan
   polling QMC5883L (soft reset `0x80`→`0x0A`, set/reset period
   `0x01`→`0x0B`, continuous mode `0x1D`→`0x09`) masih ada di
-  `src/main.cpp`, tapi seluruhnya dibungkus `#if !USE_DUMMY_DATA` — jadi
-  tidak pernah dipanggil selama flag dummy aktif. Tidak ada transaksi I2C
-  apa pun ke alamat sensor ini dalam mode dummy.
+  `src/main.cpp`, tapi hanya dikompilasi untuk `NAV_SOURCE_BLE` — jadi
+  tidak pernah dipanggil di mode simulasi. Tidak ada transaksi I2C
+  apa pun ke alamat sensor ini dalam mode simulasi.
 - **Bearing/heading 100% simulasi**, berupa sapuan halus 0°→360° berulang
   (~13 detik per putaran), murni fungsi waktu — bukan pembacaan kompas
-  fisik dalam bentuk apa pun, bukan cuma bearing tujuan.
+  fisik dalam bentuk apa pun, bukan cuma bearing tujuan. Bearing tidak
+  ikut pesan `'N'`, jadi di `NAV_SOURCE_LOOPBACK` jarum layar debug diam
+  di 0 (layar navigasi tidak memakainya).
 - **Speed, jarak-ke-belok, tipe belokan, titik garis skematik, dan jalan
   samping** juga seluruhnya digenerate software (lihat `src/nav_sim.cpp`
   untuk logikanya) — tidak ada input dari GPS, IMU, atau BLE app HP untuk
@@ -111,12 +168,17 @@ Firmware saat ini berjalan dalam **mode dummy data penuh**
 - Tujuannya murni **validasi UI & rendering LVGL** di layar fisik,
   terisolasi total dari status/ketersediaan hardware sensor.
 
-Untuk beralih ke data sensor/BLE asli nanti, cukup ubah
-`#define USE_DUMMY_DATA` di `src/nav_sim.h` menjadi `0`, lalu sambungkan
-sumber data asli (baca `nav_data_t` dari hasil parsing payload `NAV:` di
-atas, atau dari pembacaan sensor langsung) — kode UI di
-`screens/ui_gps_tracker.c` tidak perlu diubah karena sudah membaca dari
-struct `nav_data_t` yang sama, bukan langsung dari nav_sim.
+Mode loopback sudah diuji di board: 0 paket gagal, ±400–500 paket/detik
+(satu per `loop()`), 40 fps dengan waktu render dan jumlah piksel per
+frame yang sama dengan `NAV_SOURCE_SIM` (simulatornya deterministik, jadi
+rutenya identik). Test host `test/test_nav_loopback` menjalankan 40.000
+update simulator lewat codec dan memastikan selisihnya tidak melewati
+batas kuantisasi.
+
+Untuk data asli, pilih `NAV_SOURCE_BLE` dan isi `nav_data_t` dari
+`nav_decode()` atas pesan `'N'` — kode UI di `screens/ui_nav_display.c`
+dan `screens/ui_gps_tracker.c` tidak perlu diubah karena sudah membaca
+dari struct `nav_data_t` yang sama, bukan langsung dari nav_sim.
 
 ## 5. Struct/Field Mock Data (`nav_data_t`)
 
@@ -140,13 +202,12 @@ typedef struct {
 } nav_data_t;
 ```
 
-Sumber data saat ini (`src/nav_sim.c/.cpp`) mengisi struct ini dengan nilai
+Sumber data saat ini (`src/nav_sim.cpp`) mengisi struct ini dengan nilai
 simulasi. Modul ini sengaja dipisah total dari kode UI (`ui_init.cpp`,
-`screens/ui_gps_tracker.c`) supaya penggantinya nanti — baik itu hasil
-parsing BLE `NAV:` payload, atau pembacaan sensor langsung — tinggal
-mengisi `nav_data_t` yang sama lewat fungsi `nav_sim_get_data()`-nya
-sendiri (atau fungsi pengganti dengan nama lain), tanpa mengubah satu pun
-baris kode di layer UI.
+`screens/ui_gps_tracker.c`) supaya penggantinya — `nav_decode()` atas
+pesan BLE `'N'` (bagian 1), atau pembacaan sensor langsung — tinggal
+mengisi `nav_data_t` yang sama, tanpa mengubah satu pun baris kode di
+layer UI.
 
 ## 6. Layar Navigasi (`screens/ui_nav_display.c`)
 
@@ -255,7 +316,9 @@ Layar debug lama (lat/lon, kompas X/Y/Z, jarum heading) masih ada: ubah
 - **IMU (MPU6050)**: belum ada di hardware, belum ada kode pembacaannya.
   Field yang nanti butuh data IMU (mis. tilt-compensated heading) belum
   ditentukan strukturnya.
-- **Modul BLE app HP** (pengirim payload `NAV:` di atas): belum
-  diimplementasikan. BLE server yang aktif sekarang di `src/main.cpp`
-  masih untuk protokol lama (`GPS:`, `ROUTE:`), bukan untuk payload nav
-  yang didokumentasikan di bagian 1.
+- **Penerima pesan `'N'` di BLE dan app HP pengirimnya**: belum. Codec
+  dan mode loopback sudah ada (bagian 1 dan 4), tapi BLE server yang aktif
+  sekarang di `src/main.cpp` masih hanya memahami protokol lama (`GPS:`,
+  `ROUTE:`). Berikutnya: parser `'N'` di callback BLE, serah-terima
+  antar-task lewat queue FreeRTOS, tampilan data basi, dan pengirim uji di
+  laptop.
