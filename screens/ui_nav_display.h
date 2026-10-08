@@ -25,6 +25,12 @@ extern "C"
     // calling it every loop() iteration is fine.
     extern void ui_nav_display_set(const nav_data_t *nav);
 
+    // Whether the data is current. Without signal (link down or data too
+    // old) the map dims and the panel shows a no-signal mark instead of the
+    // maneuver and distance, so stale guidance never looks valid; the map
+    // fades back once data returns. Cheap; call every loop() iteration.
+    extern void ui_nav_display_set_signal(bool has_signal);
+
 #ifdef __cplusplus
 } /*extern "C"*/
 #endif

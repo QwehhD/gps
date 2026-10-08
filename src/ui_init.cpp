@@ -53,6 +53,13 @@ extern "C"
         ui_nav_display_set(nav);
     }
 
+    // Cheap: call every loop() iteration with whether the nav data is
+    // current; the navigation display only acts when it changes.
+    void ui_update_nav_signal(bool has_signal)
+    {
+        ui_nav_display_set_signal(has_signal);
+    }
+
     void ui_update_gps(double lat, double lon, float speed, float heading, int16_t x, int16_t y, int16_t z, bool connected)
     {
         char buf[128];

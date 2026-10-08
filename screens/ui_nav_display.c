@@ -77,6 +77,15 @@ static lv_obj_t *label_unit = NULL;
 #define COLOR_ARROW_EDGE_LIT lv_color_hex(0x8E94A3)
 #define COLOR_ARROW_EDGE_SHADED lv_color_hex(0x5F6574)
 
+// No signal (link down or data too old): the map fades toward the background
+// by NO_SIGNAL_DIM, and the panel shows crossed-out signal bars and "--"
+// instead of a maneuver and distance that may no longer hold.
+#define NO_SIGNAL_DIM 0.7f
+#define COLOR_NO_SIGNAL_BARS lv_color_hex(0x8E94A3)
+#define COLOR_NO_SIGNAL_SLASH lv_color_hex(0xFFB020)
+#define COLOR_TEXT_MUTED lv_color_hex(0x8E94A3)
+#define ICON_NO_SIGNAL NAV_MANEUVER_COUNT // icon id after the maneuvers
+
 // ---- Icon shapes (40x40 box, drawn pointing right/up) ----------------------
 typedef struct
 {
@@ -163,6 +172,14 @@ typedef struct
     side_view_t sides[SIDE_SLOTS];
 
     nav_maneuver_t maneuver;
+    char data_num[12]; // distance from the latest data, formatted
+    char data_unit[3];
+    float data_progress; // 0..1, from the latest data
+    int icon_drawn;      // maneuver or ICON_NO_SIGNAL in the icon canvas, -1 = none
+
+    bool no_signal;
+    float dim_target; // 0 = normal map, 1 = dimmed by NO_SIGNAL_DIM
+    float dim_shown;
 
     float progress_target; // 0..1
     float progress_shown;
@@ -297,6 +314,18 @@ static fpoint_t units_to_screen(fpoint_t p)
     return out;
 }
 
+// How bright the map is drawn: 1 normally, lower while there is no signal.
+static float map_level(void)
+{
+    return 1.0f - NO_SIGNAL_DIM * view.dim_shown;
+}
+
+// `color` faded toward the background to the current map level.
+static lv_color_t map_color(lv_color_t color)
+{
+    return view.dim_shown > 0.0f ? lv_color_mix(color, COLOR_BG, (uint8_t)(map_level() * 255.0f)) : color;
+}
+
 static void draw_side_roads(const nav_raster_t *r)
 {
     for (uint8_t i = 0; i < SIDE_SLOTS; i++)
@@ -353,7 +382,7 @@ static void draw_side_roads(const nav_raster_t *r)
             float off = SIDE_HALF_GAP_PX * edge;
             for (uint8_t k = 0; k < segs; k++)
             {
-                float strength = side->opa * (1.0f - SIDE_FADE_DEPTH * (float)k / segs);
+                float strength = side->opa * map_level() * (1.0f - SIDE_FADE_DEPTH * (float)k / segs);
                 lv_color_t color = lv_color_mix(COLOR_SIDE, COLOR_BG, (uint8_t)(strength * 255.0f));
                 nav_raster_segment(r, p[k].x + n[k].x * off, p[k].y + n[k].y * off,
                                    p[k + 1].x + n[k + 1].x * off, p[k + 1].y + n[k + 1].y * off,
@@ -378,7 +407,7 @@ static void draw_route_line(const nav_raster_t *r, float width, lv_color_t color
 // roads' edges where they meet it, so the road network reads as one piece.
 static void draw_route_edges(const nav_raster_t *r)
 {
-    draw_route_line(r, ROUTE_WIDTH + 2 * ROUTE_EDGE_WIDTH, COLOR_SIDE);
+    draw_route_line(r, ROUTE_WIDTH + 2 * ROUTE_EDGE_WIDTH, map_color(COLOR_SIDE));
 }
 
 // Opens the route's edge where a side road joins, so the side road's two
@@ -406,7 +435,7 @@ static void draw_side_mouths(const nav_raster_t *r)
         // enough to cut the edge even at junctions, where the road's first
         // point is the route's cut-off corner just outside the line, but not
         // as far as the route's opposite edge.
-        lv_color_t color = lv_color_mix(COLOR_BG, COLOR_SIDE, (uint8_t)(side->opa * 255.0f));
+        lv_color_t color = lv_color_mix(COLOR_BG, map_color(COLOR_SIDE), (uint8_t)(side->opa * 255.0f));
         nav_raster_segment(r, a.x, a.y, a.x + dx / len * SIDE_MOUTH_PX, a.y + dy / len * SIDE_MOUTH_PX,
                            2.0f * SIDE_HALF_GAP_PX - SIDE_EDGE_WIDTH, color);
     }
@@ -414,7 +443,7 @@ static void draw_side_mouths(const nav_raster_t *r)
 
 static void draw_route(const nav_raster_t *r)
 {
-    draw_route_line(r, ROUTE_WIDTH, lv_color_white());
+    draw_route_line(r, ROUTE_WIDTH, map_color(lv_color_white()));
 }
 
 // ---- LVGL-drawn pieces, on top of the map --------------------------------
@@ -518,6 +547,29 @@ static void draw_maneuver_icon(lv_layer_t *layer)
 #undef ICON_Y_AT
 }
 
+// Signal bars rising to the right, crossed out.
+static void draw_no_signal_icon(lv_layer_t *layer)
+{
+    for (int32_t i = 0; i < 4; i++)
+    {
+        int32_t x = ICON_X + 5 + 10 * i;
+        draw_line(layer, x, ICON_Y + 36, x, ICON_Y + 29 - 7 * i, ICON_STROKE, COLOR_NO_SIGNAL_BARS, LV_OPA_COVER);
+    }
+    draw_line(layer, ICON_X + 6, ICON_Y + 8, ICON_X + 36, ICON_Y + 38, 5, COLOR_NO_SIGNAL_SLASH, LV_OPA_COVER);
+}
+
+static void draw_panel_icon(lv_layer_t *layer)
+{
+    if (view.icon_drawn == ICON_NO_SIGNAL)
+    {
+        draw_no_signal_icon(layer);
+    }
+    else
+    {
+        draw_maneuver_icon(layer);
+    }
+}
+
 // Draws `draw` (which uses screen coordinates) into `canvas`, whose top-left
 // corner sits at screen (x, y).
 static void render_overlay(lv_obj_t *canvas, int32_t x, int32_t y, void (*draw)(lv_layer_t *))
@@ -582,6 +634,31 @@ static void format_distance(float meters, char *num, size_t num_size, char *unit
         snprintf(num, num_size, "%d", ((int)(meters / step + 0.5f)) * step);
         snprintf(unit, unit_size, "m");
     }
+}
+
+static void show_text(lv_obj_t *label, char *shown, size_t size, const char *text)
+{
+    if (strcmp(shown, text) != 0)
+    {
+        snprintf(shown, size, "%s", text);
+        lv_label_set_text(label, shown);
+    }
+}
+
+// Brings the icon, distance text and progress arc in line with the latest
+// data, or with the no-signal state. The icon is redrawn only when it
+// changes.
+static void update_panel(void)
+{
+    int icon = view.no_signal ? ICON_NO_SIGNAL : (int)view.maneuver;
+    if (icon != view.icon_drawn)
+    {
+        view.icon_drawn = icon;
+        render_overlay(icon_canvas, ICON_IMG_X, ICON_IMG_Y, draw_panel_icon);
+    }
+    show_text(label_distance, distance_text, sizeof(distance_text), view.no_signal ? "--" : view.data_num);
+    show_text(label_unit, unit_text, sizeof(unit_text), view.no_signal ? "" : view.data_unit);
+    view.progress_target = view.no_signal ? 0.0f : view.data_progress;
 }
 
 // ---- Route geometry --------------------------------------------------------
@@ -886,6 +963,10 @@ static void nav_anim_cb(lv_timer_t *timer)
         }
     }
 
+    // Fading the map in or out of the no-signal state redraws it with the
+    // raster only; once the fade settles nothing extra is drawn.
+    redraw_roads |= ease_toward(&view.dim_shown, view.dim_target, k);
+
     for (uint8_t j = 0; j < SIDE_SLOTS; j++)
     {
         side_view_t *side = &view.sides[j];
@@ -930,6 +1011,7 @@ void ui_nav_display_screen_init(void)
 {
     memset(&view, 0, sizeof(view));
     view.maneuver = NAV_MANEUVER_STRAIGHT;
+    view.icon_drawn = -1;
     view.last_tick = lv_tick_get();
     distance_text[0] = '\0';
     unit_text[0] = '\0';
@@ -957,7 +1039,6 @@ void ui_nav_display_screen_init(void)
     icon_canvas = lv_canvas_create(ui_nav_display);
     lv_canvas_set_draw_buf(icon_canvas, &icon_buf);
     lv_obj_set_pos(icon_canvas, ICON_IMG_X, ICON_IMG_Y);
-    render_overlay(icon_canvas, ICON_IMG_X, ICON_IMG_Y, draw_maneuver_icon);
 
     label_distance = make_label(&lv_font_montserrat_36, lv_color_white());
     lv_label_set_text(label_distance, "");
@@ -967,6 +1048,7 @@ void ui_nav_display_screen_init(void)
     lv_label_set_text(label_unit, "");
     lv_obj_set_pos(label_unit, UNIT_LABEL_X, UNIT_LABEL_Y);
 
+    update_panel();
     anim_timer = lv_timer_create(nav_anim_cb, ANIM_PERIOD_MS, NULL);
 }
 
@@ -998,28 +1080,31 @@ void ui_nav_display_set(const nav_data_t *nav)
 
     update_side_targets(nav);
 
-    if (nav->maneuver != view.maneuver)
-    {
-        view.maneuver = nav->maneuver;
-        render_overlay(icon_canvas, ICON_IMG_X, ICON_IMG_Y, draw_maneuver_icon);
-    }
-
+    view.maneuver = nav->maneuver;
     float progress = 1.0f - nav->distance_to_turn_m / PROGRESS_RANGE_M;
-    view.progress_target = progress < 0.0f ? 0.0f : (progress > 1.0f ? 1.0f : progress);
+    view.data_progress = progress < 0.0f ? 0.0f : (progress > 1.0f ? 1.0f : progress);
+    format_distance(nav->distance_to_turn_m, view.data_num, sizeof(view.data_num),
+                    view.data_unit, sizeof(view.data_unit));
+    update_panel();
+}
 
-    char num[12];
-    char unit[3];
-    format_distance(nav->distance_to_turn_m, num, sizeof(num), unit, sizeof(unit));
-    if (strcmp(num, distance_text) != 0)
+void ui_nav_display_set_signal(bool has_signal)
+{
+    if (ui_nav_display == NULL || view.no_signal == !has_signal)
     {
-        strcpy(distance_text, num);
-        lv_label_set_text(label_distance, num);
+        return;
     }
-    if (strcmp(unit, unit_text) != 0)
-    {
-        strcpy(unit_text, unit);
-        lv_label_set_text(label_unit, unit);
-    }
+    view.no_signal = !has_signal;
+    view.dim_target = view.no_signal ? 1.0f : 0.0f;
+    lv_obj_set_style_text_color(label_distance, view.no_signal ? COLOR_TEXT_MUTED : lv_color_white(), LV_PART_MAIN);
+    update_panel();
+    // The arc jumps with the rest of the panel instead of easing: easing it
+    // during the map fade would redraw the arc area every frame too, and
+    // sending both areas pushes those frames past the refresh period.
+    view.progress_shown = view.progress_target;
+    // Map, icon, labels and arc all change now. As separate areas each would
+    // run the whole draw callback again; one full-screen area is one pass.
+    invalidate_rect(0, 0, 239, 239);
 }
 
 void ui_nav_display_screen_destroy(void)
