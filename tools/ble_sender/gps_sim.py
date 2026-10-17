@@ -31,30 +31,80 @@ SAMPLE_ROUTE: list[LatLon] = [
 
 
 def load_route(path: str | Path) -> list[LatLon]:
-    """Reads a route from JSON: either {"points": [[lat, lon], ...]} or a
-    GeoJSON LineString (geometry, Feature, or the first LineString in a
-    FeatureCollection; GeoJSON coordinates are [lon, lat])."""
-    data = json.loads(Path(path).read_text())
+    """The points of a route file; see read_route_file()."""
+    return read_route_file(path)[0]
+
+
+def read_route_file(path: str | Path) -> tuple[list[LatLon], str]:
+    """Reads a route from JSON and returns (points, what was read).
+
+    Accepted: {"points": [[lat, lon], ...]}, or GeoJSON: a LineString
+    geometry, a Feature holding one, or a FeatureCollection, of which the
+    first LineString is used. That covers the OpenRouteService answers saved
+    by fetch_route.py and lines drawn on geojson.io (whose Point markers are
+    skipped). GeoJSON coordinates are [lon, lat]; a latitude outside -90..90
+    means the order is swapped, and the file is refused."""
+    try:
+        data = json.loads(Path(path).read_bytes())
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{path}: not valid JSON ({e})") from None
+
     if isinstance(data, dict) and "points" in data:
-        return [(float(lat), float(lon)) for lat, lon in data["points"]]
+        return _positions(path, data["points"], lat_first=True), "points list"
 
-    def find_line(obj):
-        kind = obj.get("type")
-        if kind == "LineString":
-            return obj["coordinates"]
-        if kind == "Feature":
-            return find_line(obj["geometry"])
-        if kind == "FeatureCollection":
-            for feature in obj["features"]:
-                line = find_line(feature)
-                if line:
-                    return line
-        return None
+    geometries = _geometries(data)
+    lines = [g for g in geometries if g.get("type") == "LineString"]
+    if not lines:
+        found = ", ".join(sorted({str(g.get("type")) for g in geometries})) or "nothing"
+        raise ValueError(f"{path}: no GeoJSON LineString found (found: {found}); expected a LineString, "
+                         "a Feature or FeatureCollection holding one, or {\"points\": [[lat, lon], ...]}")
+    source = f"GeoJSON {data['type']}"
+    if len(lines) > 1:
+        source += f", first of {len(lines)} LineStrings"
+    return _positions(path, lines[0].get("coordinates"), lat_first=False), source
 
-    line = find_line(data) if isinstance(data, dict) else None
-    if not line:
-        raise ValueError(f"{path}: expected {{'points': [[lat, lon], ...]}} or a GeoJSON LineString")
-    return [(float(c[1]), float(c[0])) for c in line]
+
+def _geometries(obj) -> list[dict]:
+    """The geometries in a GeoJSON object, in file order: the object itself,
+    a Feature's geometry, or those of every feature in a FeatureCollection."""
+    if not isinstance(obj, dict):
+        return []
+    kind = obj.get("type")
+    if kind == "FeatureCollection":
+        features = obj.get("features")
+        return [g for f in features for g in _geometries(f)] if isinstance(features, list) else []
+    if kind == "Feature":
+        return _geometries(obj.get("geometry"))
+    return [obj] if kind else []
+
+
+def _positions(path: str | Path, coords, lat_first: bool) -> list[LatLon]:
+    """(lat, lon) points from [lat, lon] pairs, or from GeoJSON [lon, lat]
+    positions (a third value, the elevation, is ignored)."""
+    def is_number(v) -> bool:
+        return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+    if not isinstance(coords, list) or not all(
+            isinstance(c, list) and len(c) >= 2 and is_number(c[0]) and is_number(c[1]) for c in coords):
+        raise ValueError(f"{path}: the coordinates must be a list of [number, number] pairs")
+    if len(coords) < 2:
+        raise ValueError(f"{path}: a route needs at least 2 points, the file has {len(coords)}")
+    points = [(float(c[0]), float(c[1])) if lat_first else (float(c[1]), float(c[0])) for c in coords]
+
+    if lat_first:
+        order = '"points" are [latitude, longitude]'
+    else:
+        order = "GeoJSON coordinates are [longitude, latitude]"
+    bad = [i for i, (lat, _) in enumerate(points) if not -90.0 <= lat <= 90.0]
+    if bad:
+        raise ValueError(f"{path}: {len(bad)} of {len(points)} points have a latitude outside -90..90 "
+                         f"(first: point {bad[0]}, {coords[bad[0]][:2]}); {order}, so the order in "
+                         "this file is probably swapped")
+    bad = [i for i, (_, lon) in enumerate(points) if not -180.0 <= lon <= 180.0]
+    if bad:
+        raise ValueError(f"{path}: {len(bad)} of {len(points)} points have a longitude outside -180..180 "
+                         f"(first: point {bad[0]}, {coords[bad[0]][:2]}); {order}")
+    return points
 
 
 class FakeGps:
