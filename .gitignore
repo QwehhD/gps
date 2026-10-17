@@ -10,3 +10,7 @@ ATURAN-KERJA.md
 __pycache__/
 .pytest_cache/
 .venv/
+.env
+
+# Route files from fetch_route.py hold personal locations
+tools/ble_sender/routes/*.geojson
