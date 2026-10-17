@@ -62,22 +62,28 @@ yang salah. Hal yang sama berlaku untuk daftar `points` (urutannya
 Sebelum mulai mengirim, skrip mencetak ringkasan rute sebagai acuan untuk
 mencocokkan layar: jumlah titik, panjang total, dan setiap belokan yang
 dideteksi dari geometri rute (`navgeo.py`, sama dengan yang dikirim ke
-layar):
+layar). Contoh untuk rute ORS
+`fetch_route.py --from "-6.1790,106.8225" --to "-6.1900,106.8242" --name monas`:
 
 ```
 route: routes/monas.geojson (GeoJSON FeatureCollection)
-  46 points, 5001 m
-  4 turns (direction change over 20 m either side, sharper than 35°):
+  58 points, 2361 m
+  3 turns (direction change over 20 m either side, sharper than 35°; u-turn: 150° or more within 40 m):
       #  direction  angle  from start  lat,lon
-      1  right        90°       995 m  -6.170000,106.822500
-      2  right        90°      1880 m  -6.170000,106.830500
-      3  right        90°      3096 m  -6.181000,106.830500
-      4  left         96°      3982 m  -6.181000,106.822500
+      1  u-turn      180°       512 m  -6.174452,106.822908
+      2  left         94°      2085 m  -6.188491,106.823137
+      3  right        91°      2192 m  -6.188468,106.824101
 ```
 
 `angle` adalah perubahan arah antara 20 m sebelum dan 20 m sesudah titik
-belok (≥ 150° menjadi `u-turn`). `lat,lon` berurutan seperti Google Maps,
-jadi bisa ditempel ke kotak pencarian untuk melihat lokasinya.
+belok. Kalau lekukan di sekitarnya berjumlah ≥ 150° dalam ±40 m, belokan itu
+menjadi `u-turn` dan `angle`-nya adalah total lekukan tersebut. Jadi putar
+balik lewat jalan samping (belokan pertama di atas; ORS sendiri hanya
+menyebutnya "keep right") atau lewat celah median selebar sampai ~40 m
+terbaca satu `u-turn`, bukan belok kanan. Belokan lain tidak pernah dibuang,
+karena detektor hanya melihat garis rute, bukan jalan di sekitarnya.
+`lat,lon` berurutan seperti Google Maps, jadi bisa ditempel ke kotak
+pencarian untuk melihat lokasinya.
 
 Kalau `--chunk-size` lebih besar dari batas write link, atau terlalu kecil
 sehingga pesan terbesar (275 B) butuh lebih dari 32 frame, skrip berhenti
