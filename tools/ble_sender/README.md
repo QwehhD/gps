@@ -55,6 +55,28 @@ link langsung.
 Statistik di sisi ESP32 dicetak ke serial tiap 5 detik selama tersambung
 (`ble: ... complete, dropped (missing chunk), ... lost by seq ...`).
 
+## Rute dari OpenRouteService
+
+`fetch_route.py` mengambil rute mobil dari OpenRouteService (Directions V2,
+profile `driving-car`) **sekali**, lalu menyimpan respons GeoJSON-nya apa
+adanya ke `routes/<nama>.geojson`. Uji `--latlon` berikutnya memakai berkas
+itu, jadi bisa diulang tanpa internet dan tanpa memakai kuota.
+
+```bash
+.venv/bin/python fetch_route.py --from "-7.9666,112.6326" --to "-7.9826,112.6308" --name kampus
+.venv/bin/python ble_sender.py --latlon routes/kampus.geojson
+```
+
+- Titik ditulis **`lat,lon`** (latitude dulu), sama dengan urutan yang muncul
+  saat klik kanan di Google Maps; spasi setelah koma boleh. Script yang
+  membaliknya ke `lon,lat` untuk ORS.
+- Titik yang tampak tertukar (latitude di luar −90…90) ditolak beserta urutan
+  yang benar.
+- API key diambil dari environment variable `ORS_API_KEY`, atau dari baris
+  `ORS_API_KEY=...` di `tools/ble_sender/.env`. Key tidak pernah dicetak.
+- Berkas yang sudah ada tidak ditimpa, kecuali dengan `--force`.
+- `.env` dan `routes/*.geojson` (berisi lokasi pribadi) masuk `.gitignore`.
+
 ## Modul
 
 | Berkas | Isi |
@@ -63,6 +85,7 @@ Statistik di sisi ESP32 dicetak ke serial tiap 5 detik selama tersambung
 | `navgeo.py` | **Implementasi referensi untuk app HP**: map-matching, potong jendela −12…+80 satuan, equirectangular, sederhanakan ≤ 32 titik, heading dari tangen rute, rotasi heading-up, 15 m/satuan |
 | `gps_sim.py` | GPS pura-pura yang bergerak di sepanjang rute, rute contoh, pembaca file rute |
 | `synthetic.py` | Port simulator firmware |
+| `fetch_route.py` | Pengambil rute OpenRouteService ke `routes/<nama>.geojson` |
 | `ble_sender.py` | Skrip utama |
 
 ## Test
