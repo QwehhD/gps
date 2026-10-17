@@ -94,7 +94,7 @@ def check_chunk_size(chunk_size: int, max_write: int | None) -> None:
 def route_summary(route, source: str) -> str:
     """What --latlon prints before riding: the turns the route geometry
     gives, to check against what the display shows."""
-    from navgeo import TURN_CHORD_M, TURN_MIN_DEG
+    from navgeo import TURN_CHORD_M, TURN_MIN_DEG, UTURN_MIN_DEG, UTURN_SPAN_M
 
     lines = [f"route: {source}", f"  {len(route.latlon)} points, {route.length:.0f} m"]
     if not route.turns:
@@ -103,7 +103,8 @@ def route_summary(route, source: str) -> str:
     direction = {Maneuver.TURN_LEFT: "left", Maneuver.TURN_RIGHT: "right", Maneuver.U_TURN: "u-turn"}
     count = len(route.turns)
     lines.append(f"  {count} turn{'s' if count > 1 else ''} (direction change over "
-                 f"{TURN_CHORD_M:g} m either side, sharper than {TURN_MIN_DEG:g}°):")
+                 f"{TURN_CHORD_M:g} m either side, sharper than {TURN_MIN_DEG:g}°; "
+                 f"u-turn: {UTURN_MIN_DEG:g}° or more within {UTURN_SPAN_M:g} m):")
     lines.append("      #  direction  angle  from start  lat,lon")
     for n, turn in enumerate(route.turns, 1):
         lat, lon = route.latlon_at(turn.s)

@@ -20,7 +20,10 @@ This is the reference implementation for the phone app. Each update:
 7. Divide by 15 m per unit.
 
 The next maneuver comes from the route's own geometry (turns sharper than
-35 degrees). A real app should take maneuvers from its routing API instead.
+35 degrees). A turn whose curve adds up to 150 degrees or more within 40 m
+either side is a U-turn, so a loop through a side road or a turn across a
+wide median counts as one. A real app should take maneuvers from its
+routing API instead.
 """
 
 from __future__ import annotations
@@ -49,6 +52,8 @@ TURN_MIN_DEG = 35.0
 TURN_CHORD_M = 20.0
 TURN_MERGE_M = 30.0
 UTURN_MIN_DEG = 150.0
+UTURN_SPAN_M = 40.0  # a U-turn adds up to UTURN_MIN_DEG within this distance either side
+TURN_MIN_SEGMENT_M = 1.0
 
 LatLon = tuple[float, float]
 Point = tuple[float, float]
@@ -133,7 +138,7 @@ def simplify(points: list[Point], max_points: int, keep_index: int | None = None
 class Turn:
     s: float  # route distance of the turn, metres
     maneuver: Maneuver
-    angle_deg: float  # change of direction across the turn, + = right (clockwise)
+    angle_deg: float  # change of direction across the turn (a U-turn: its whole curve), + = right
 
 
 class Route:
@@ -218,16 +223,39 @@ class Route:
                     turns[-1] = (s, delta)
             else:
                 turns.append((s, delta))
-        out = []
+        # A U-turn through a side road or a wide median is spread over tens of
+        # metres, more than the chord sees: judge it by the whole curve, and
+        # fold the later corners of that curve (same direction) into the first.
+        # A turn the other way right after it is kept.
+        out: list[Turn] = []
         for s, delta in turns:
-            if abs(delta) >= UTURN_MIN_DEG:
-                maneuver = Maneuver.U_TURN
-            elif delta < 0.0:
-                maneuver = Maneuver.TURN_LEFT
+            last = out[-1] if out else None
+            if (last is not None and last.maneuver == Maneuver.U_TURN and s - last.s <= UTURN_SPAN_M
+                    and (delta > 0.0) == (last.angle_deg > 0.0)):
+                continue
+            total = self._heading_change(s - UTURN_SPAN_M, s + UTURN_SPAN_M)
+            if abs(total) >= UTURN_MIN_DEG:
+                out.append(Turn(s, Maneuver.U_TURN, total))
+            elif abs(delta) >= UTURN_MIN_DEG:
+                out.append(Turn(s, Maneuver.U_TURN, delta))
             else:
-                maneuver = Maneuver.TURN_RIGHT
-            out.append(Turn(s, maneuver, delta))
+                out.append(Turn(s, Maneuver.TURN_LEFT if delta < 0.0 else Maneuver.TURN_RIGHT, delta))
         return out
+
+    def _heading_change(self, s_from: float, s_to: float) -> float:
+        """How far the route turns between s_from and s_to: the signed sum of
+        the direction changes at the vertices in between, degrees, + = right.
+        Segments shorter than TURN_MIN_SEGMENT_M are skipped, as their
+        direction is mostly coordinate rounding."""
+        total, prev = 0.0, None
+        for i, (a, b) in enumerate(zip(self.xy, self.xy[1:])):
+            if self.cum[i + 1] - self.cum[i] < TURN_MIN_SEGMENT_M:
+                continue
+            bearing = bearing_deg(*_sub(b, a))
+            if prev is not None and s_from < self.cum[i] < s_to:
+                total += (bearing - prev + 180.0) % 360.0 - 180.0
+            prev = bearing
+        return total
 
     def window(self, s0: float) -> tuple[list[LatLon], int]:
         """Route points from s0 - 12 to s0 + 80 units (clamped to the route):

@@ -153,6 +153,46 @@ def test_turn_angle_is_signed_right_positive():
     assert abs(uturn) >= 150.0
 
 
+def walk(legs) -> Route:
+    """A route from (0, 0) along legs of (bearing in degrees, length in metres)."""
+    east, north = 0.0, 0.0
+    points = [offset(east, north)]
+    for bearing, length in legs:
+        east += length * math.sin(math.radians(bearing))
+        north += length * math.cos(math.radians(bearing))
+        points.append(offset(east, north))
+    return Route(points)
+
+
+def test_a_u_turn_through_a_side_road_is_one_u_turn():
+    # North, then a loop to the right through a side road over about 57 m
+    # (the bearings of an OpenRouteService route by Monas), then south. No
+    # 20 m chord sees more than about 75 degrees of it.
+    loop = [(23, 14.3), (46, 4.5), (79, 7.9), (95, 6.7), (119, 4.8), (151, 18.9)]
+    route = walk([(0, 480), *loop, (181, 500)])
+    assert [t.maneuver for t in route.turns] == [Maneuver.U_TURN]
+    assert route.turns[0].angle_deg == pytest.approx(181.0, abs=1.0)
+    assert 480 < route.turns[0].s < 540
+
+
+@pytest.mark.parametrize("gap", [2, 10, 20, 30])
+def test_a_u_turn_across_a_median_is_one_u_turn(gap):
+    route = walk([(90, 500), (180, gap), (270, 500)])
+    assert [(t.maneuver, round(t.s)) for t in route.turns] == [(Maneuver.U_TURN, 500)]
+    assert route.turns[0].angle_deg == pytest.approx(180.0)
+
+
+def test_two_right_turns_around_a_block_stay_two_turns():
+    route = walk([(90, 500), (180, 60), (270, 500)])
+    assert [t.maneuver for t in route.turns] == [Maneuver.TURN_RIGHT, Maneuver.TURN_RIGHT]
+
+
+def test_a_turn_the_other_way_right_after_a_u_turn_is_kept():
+    route = walk([(90, 500), (180, 10), (270, 30), (180, 300)])
+    assert [(t.maneuver, round(t.s)) for t in route.turns] == [
+        (Maneuver.U_TURN, 500), (Maneuver.TURN_LEFT, 540)]
+
+
 def test_riding_the_sample_route_with_noise():
     route = Route(SAMPLE_ROUTE)
     gps = FakeGps(route, speed_kmh=40, noise_m=5, rng=random.Random(2))
