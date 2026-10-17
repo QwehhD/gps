@@ -22,9 +22,9 @@ env PLATFORMIO_BUILD_FLAGS="-DNAV_SOURCE=NAV_SOURCE_BLE" pio run -t upload --upl
 ## Pemakaian
 
 ```bash
-.venv/bin/python ble_sender.py --synthetic                  # rute acak seperti simulator firmware
-.venv/bin/python ble_sender.py --latlon                     # rute contoh di sekitar Monas
-.venv/bin/python ble_sender.py --latlon rute.json --noise 5 # rute sendiri + noise GPS 5 m
+.venv/bin/python ble_sender.py --synthetic                              # rute acak seperti simulator firmware
+.venv/bin/python ble_sender.py --latlon                                 # rute contoh di sekitar Monas
+.venv/bin/python ble_sender.py --latlon routes/kampus.geojson --noise 5 # rute sendiri + noise GPS 5 m
 ```
 
 Saat berjalan: **Enter** = jeda/lanjut (koneksi tetap tersambung, untuk
@@ -33,7 +33,7 @@ menguji state "tidak ada sinyal" setelah 3 detik), **q + Enter** = keluar.
 | Opsi | Arti |
 | --- | --- |
 | `--synthetic` | Rute acak langsung dalam koordinat lokal (setara `src/nav_sim.cpp`); hanya menguji transport |
-| `--latlon [FILE]` | Rute lat/lon + posisi GPS simulasi; menjalankan pipeline HP (`navgeo.py`). Tanpa FILE memakai rute contoh |
+| `--latlon [FILE]` | Rute lat/lon (GeoJSON atau daftar `points`, lihat di bawah) + posisi GPS simulasi; menjalankan pipeline HP (`navgeo.py`). Tanpa FILE memakai rute contoh |
 | `--rate HZ` | Pesan per detik (bawaan 5) |
 | `--chunk-size N` | Byte per write, header frame ikut dihitung. Bawaan: batas write tanpa respons dari link. Coba `182` (setara iOS) dan `20` (MTU minimum BLE) |
 | `--drop P` | Lewati seluruh pesan dengan peluang P → firmware mencatat `lost by seq` |
@@ -43,8 +43,41 @@ menguji state "tidak ada sinyal" setelah 3 detik), **q + Enter** = keluar.
 | `--duration S`, `--seed N` | Berhenti setelah S detik; seed acak supaya bisa diulang |
 | `--dry-run` | Tanpa BLE: hanya membangun dan menghitung frame |
 
-File rute: `{"points": [[lat, lon], ...]}` atau GeoJSON `LineString`
-(koordinat GeoJSON berurutan `[lon, lat]`).
+### File rute untuk `--latlon`
+
+- **GeoJSON**: geometry `LineString` polos, `Feature` berisi `LineString`,
+  atau `FeatureCollection` — yang dipakai `LineString` pertama, fitur lain
+  seperti marker `Point` dilewati. Jadi respons ORS dari `fetch_route.py`
+  maupun garis yang digambar di [geojson.io](https://geojson.io) bisa
+  langsung dipakai. Kalau ada lebih dari satu `LineString`, ringkasan
+  menyebut "first of N LineStrings"; `MultiLineString` tidak diterima.
+- **Daftar titik**: `{"points": [[lat, lon], ...]}`.
+
+Koordinat GeoJSON berurutan **`[longitude, latitude]`**, kebalikan dari
+Google Maps. Kalau ada latitude di luar −90…90, berkas ditolak dengan pesan
+bahwa urutannya kemungkinan tertukar, beserta nomor dan isi titik pertama
+yang salah. Hal yang sama berlaku untuk daftar `points` (urutannya
+`[lat, lon]`).
+
+Sebelum mulai mengirim, skrip mencetak ringkasan rute sebagai acuan untuk
+mencocokkan layar: jumlah titik, panjang total, dan setiap belokan yang
+dideteksi dari geometri rute (`navgeo.py`, sama dengan yang dikirim ke
+layar):
+
+```
+route: routes/monas.geojson (GeoJSON FeatureCollection)
+  46 points, 5001 m
+  4 turns (direction change over 20 m either side, sharper than 35°):
+      #  direction  angle  from start  lat,lon
+      1  right        90°       995 m  -6.170000,106.822500
+      2  right        90°      1880 m  -6.170000,106.830500
+      3  right        90°      3096 m  -6.181000,106.830500
+      4  left         96°      3982 m  -6.181000,106.822500
+```
+
+`angle` adalah perubahan arah antara 20 m sebelum dan 20 m sesudah titik
+belok (≥ 150° menjadi `u-turn`). `lat,lon` berurutan seperti Google Maps,
+jadi bisa ditempel ke kotak pencarian untuk melihat lokasinya.
 
 Kalau `--chunk-size` lebih besar dari batas write link, atau terlalu kecil
 sehingga pesan terbesar (275 B) butuh lebih dari 32 frame, skrip berhenti
@@ -83,7 +116,7 @@ itu, jadi bisa diulang tanpa internet dan tanpa memakai kuota.
 | --- | --- |
 | `navproto.py` | Encoder pesan `'N'` dan pemecah frame (cermin `src/nav_codec.c` dan `src/nav_frag.c`) |
 | `navgeo.py` | **Implementasi referensi untuk app HP**: map-matching, potong jendela −12…+80 satuan, equirectangular, sederhanakan ≤ 32 titik, heading dari tangen rute, rotasi heading-up, 15 m/satuan |
-| `gps_sim.py` | GPS pura-pura yang bergerak di sepanjang rute, rute contoh, pembaca file rute |
+| `gps_sim.py` | GPS pura-pura yang bergerak di sepanjang rute, rute contoh, pembaca file rute (GeoJSON / `points`) beserta validasinya |
 | `synthetic.py` | Port simulator firmware |
 | `fetch_route.py` | Pengambil rute OpenRouteService ke `routes/<nama>.geojson` |
 | `ble_sender.py` | Skrip utama |
