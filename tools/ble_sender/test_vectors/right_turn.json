@@ -1,0 +1,60 @@
+{
+  "name": "right_turn",
+  "description": "Heading 30 degrees, a right turn onto 120 degrees 180 m ahead; the fix is 3 m left of the road.",
+  "config": {
+    "m_per_unit": 15.0,
+    "window_behind_units": 12.0,
+    "window_ahead_units": 80.0,
+    "heading_chord_units": 3.0,
+    "max_route_points": 32,
+    "coord_scale": 16,
+    "m_per_deg_lat": 110540.0,
+    "m_per_deg_lon_at_equator": 111320.0
+  },
+  "input": {
+    "route_latlon": [
+      [-7.0, 110.0],
+      [-6.995299301227876, 110.00271517200537],
+      [-6.997560925979097, 110.00663418522586]
+    ],
+    "turns": [
+      {
+        "index": 1,
+        "s_m": 599.9999999998447,
+        "maneuver": "TURN_RIGHT"
+      }
+    ],
+    "fix_latlon": [-6.996695941111005, 110.00187710632443],
+    "previous_s_m": null,
+    "speed_kmh": 32,
+    "seq": 1
+  },
+  "expected": {
+    "route_length_m": 1100.0000000005095,
+    "matched_s_m": 419.9999999996781,
+    "offset_m": 3.0000000005126437,
+    "heading_deg": 29.999999999982283,
+    "maneuver": "TURN_RIGHT",
+    "distance_to_turn_m": 180.0000000001666,
+    "total_distance_m": 680.0000000008315,
+    "window_units": [
+      [-3.6632088513973336e-05, -12.000021149543056],
+      [0.0, 0.0],
+      [3.663208196845365e-05, 12.000021149554394],
+      [33.3335462117649, 12.000122905421536]
+    ],
+    "message_hex": "4e010201b40044002004000040ff000000000000c0001502c00000",
+    "frames_hex": {
+      "20": [
+        "ce0100024e010201b40044002004000040ff0000",
+        "ce01010200000000c0001502c00000"
+      ],
+      "182": [
+        "ce0100014e010201b40044002004000040ff000000000000c0001502c00000"
+      ],
+      "514": [
+        "ce0100014e010201b40044002004000040ff000000000000c0001502c00000"
+      ]
+    }
+  }
+}

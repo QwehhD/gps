@@ -1,0 +1,59 @@
+{
+  "name": "near_end",
+  "description": "30 m before the end of the route, past its last turn, with a previous match: the window stops at the end and the maneuver is straight to the end. Sequence number 255.",
+  "config": {
+    "m_per_unit": 15.0,
+    "window_behind_units": 12.0,
+    "window_ahead_units": 80.0,
+    "heading_chord_units": 3.0,
+    "max_route_points": 32,
+    "coord_scale": 16,
+    "m_per_deg_lat": 110540.0,
+    "m_per_deg_lon_at_equator": 111320.0
+  },
+  "input": {
+    "route_latlon": [
+      [-7.0, 110.0],
+      [-6.997738375248779, 109.9960809867795],
+      [-6.9946045760673625, 109.99789110144975]
+    ],
+    "turns": [
+      {
+        "index": 1,
+        "s_m": 500.0000000006649,
+        "maneuver": "TURN_RIGHT"
+      }
+    ],
+    "fix_latlon": [-6.994839611005975, 109.99775534284949],
+    "previous_s_m": 850.0,
+    "speed_kmh": 15,
+    "seq": 255
+  },
+  "expected": {
+    "route_length_m": 900.0000000008231,
+    "matched_s_m": 870.0000000003503,
+    "offset_m": 6.741353168359111e-10,
+    "heading_deg": 30.000000000047216,
+    "maneuver": "STRAIGHT",
+    "distance_to_turn_m": 30.000000000472824,
+    "total_distance_m": 30.000000000472824,
+    "window_units": [
+      [-5.744161059719015e-05, -12.00003316392653],
+      [0.0, 0.0],
+      [9.573556275791855e-06, 2.000005527330094]
+    ],
+    "message_hex": "4eff00011e0003000f03000040ff000000000000200000",
+    "frames_hex": {
+      "20": [
+        "ceff00024eff00011e0003000f03000040ff0000",
+        "ceff010200000000200000"
+      ],
+      "182": [
+        "ceff00014eff00011e0003000f03000040ff000000000000200000"
+      ],
+      "514": [
+        "ceff00014eff00011e0003000f03000040ff000000000000200000"
+      ]
+    }
+  }
+}

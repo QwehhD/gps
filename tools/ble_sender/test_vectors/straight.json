@@ -1,0 +1,52 @@
+{
+  "name": "straight",
+  "description": "One straight road on 45 degrees, no maneuver: the distance is to the end of the route; the fix is 5 m right of the road.",
+  "config": {
+    "m_per_unit": 15.0,
+    "window_behind_units": 12.0,
+    "window_ahead_units": 80.0,
+    "heading_chord_units": 3.0,
+    "max_route_points": 32,
+    "coord_scale": 16,
+    "m_per_deg_lat": 110540.0,
+    "m_per_deg_lon_at_equator": 111320.0
+  },
+  "input": {
+    "route_latlon": [
+      [-7.0, 110.0],
+      [-6.992323791049178, 110.00767966614833]
+    ],
+    "turns": [],
+    "fix_latlon": [-6.998752616045492, 110.001311942967],
+    "previous_s_m": null,
+    "speed_kmh": 60,
+    "seq": 4
+  },
+  "expected": {
+    "route_length_m": 1199.9999999998206,
+    "matched_s_m": 199.99999999994628,
+    "offset_m": 5.000000000003035,
+    "heading_deg": 44.99999999999101,
+    "maneuver": "STRAIGHT",
+    "distance_to_turn_m": 999.9999999998743,
+    "total_distance_m": 999.9999999998743,
+    "window_units": [
+      [-1.644863350615348e-05, -12.000016448629397],
+      [0.0, 0.0],
+      [9.138097754354627e-05, 66.66675804763578]
+    ],
+    "message_hex": "4e040001e80364003c03000040ff0000000000002b0400",
+    "frames_hex": {
+      "20": [
+        "ce0400024e040001e80364003c03000040ff0000",
+        "ce040102000000002b0400"
+      ],
+      "182": [
+        "ce0400014e040001e80364003c03000040ff0000000000002b0400"
+      ],
+      "514": [
+        "ce0400014e040001e80364003c03000040ff0000000000002b0400"
+      ]
+    }
+  }
+}
