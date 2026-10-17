@@ -6,8 +6,9 @@ junction view) tidak hilang begitu implementasi sensor/BLE beneran mulai
 dikerjakan. Yang sudah jalan: mode simulasi software, **format pesan biner
 `'N'`**, **fragmentasi BLE**, penerima di ESP32 dengan state "tidak ada
 sinyal", dan pengirim uji di laptop (`tools/ble_sender/`) yang juga memuat
-implementasi referensi konversi lat/lon untuk app HP. Yang belum: app HP
-itu sendiri (lihat bagian "Mode Sumber Data").
+implementasi referensi konversi lat/lon untuk app HP, pemetaan maneuver
+OpenRouteService, dan test vector untuk port-nya. Yang belum: app HP itu
+sendiri (lihat bagian "Mode Sumber Data").
 
 ## 1. Format Payload BLE: pesan biner `'N'`
 
@@ -144,10 +145,85 @@ loop():    xQueuePeek ─► umur ≤ 3 s && tersambung ─► ui_update_nav_sig
   `ble: connected | msgs 165 (4.2/s) | frames: complete 165, dropped 17 (missing chunk), bad 0, dup 0 | decode errors 0 | lost by seq 21 | internal heap free 42972 B (min 35272, largest 32756)`.
 - Heap internal bebas saat runtime: ±46,7 KB sebelum tersambung, ±42,8 KB
   saat menerima, minimum tercatat ±35 KB.
+- Pergantian state dicatat ke serial: `nav: no signal (no valid message for
+  3 s)`, `nav: no signal (link down)`, dan `nav: signal back`.
+
+**Data basi dengan link tetap tersambung** (diuji 17 Okt 2026 di board,
+`ble_sender.py --latlon … --pause-cycle 10,10 --duration 30`, log serial
+dan pengirim diberi waktu dari jam laptop yang sama):
+
+| Kejadian | Waktu sejak mulai kirim |
+| --- | --- |
+| Pesan terakhir sebelum jeda | 9,801 s |
+| `nav: no signal (no valid message for 3 s)` | 12,879 s, **3,08 s** setelah pesan terakhir |
+| Pengiriman berlanjut | 20,001 s |
+| `nav: signal back` | 20,051 s, **0,05 s** kemudian |
+| Pengirim memutus link di akhir → `nav: no signal (link down)` | 0,015 s setelah putus |
+
+Link BLE tidak pernah putus selama jeda (satu `BLE Client connected` di
+awal, satu `disconnected` di akhir), jadi pemulihan tidak butuh reconnect.
+100 pesan lengkap, 0 terbuang, 0 hilang menurut nomor urut. Kelebihan
+±80 ms di atas 3 s kemungkinan berasal dari interval `loop()` (render sampai
+±25 ms) dan latensi serial; belum diukur terpisah.
 
 Pesan teks lama tetap diterima: `GPS:lat,lon,speed` mengisi label layar
 debug, `ROUTE:` hanya dicatat ke log. Di `NAV_SOURCE_SIM`/`LOOPBACK`, frame
 `0xCE` diabaikan.
+
+### Maneuver dari routing (OpenRouteService)
+
+Field `maneuver` hanya punya empat nilai (`nav_maneuver_t`): lurus, kiri,
+kanan, putar balik. App HP mengambil maneuver dari instruksi routing; untuk
+ORS (Directions V2, format GeoJSON) dari `properties.segments[].steps`.
+Setiap step terjadi di titik rute `way_points[0]`-nya, jadi jaraknya dari
+awal rute adalah jarak kumulatif polyline sampai titik itu. Implementasi
+referensinya `tools/ble_sender/maneuvers.py`.
+
+| Tipe ORS | Nama | Dikirim sebagai |
+| --- | --- | --- |
+| 0 | Left | `TURN_LEFT` |
+| 1 | Right | `TURN_RIGHT` |
+| 2 | Sharp left | `TURN_LEFT` |
+| 3 | Sharp right | `TURN_RIGHT` |
+| 4 | Slight left | `TURN_LEFT` |
+| 5 | Slight right | `TURN_RIGHT` |
+| 6 | Straight | tanpa maneuver (layar menampilkan maneuver berikutnya) |
+| 7 | Enter roundabout | belokan jalan keluarnya: perubahan arah dari 20 m sebelum masuk sampai 20 m setelah keluar (`way_points[1]`); < 35° tanpa maneuver, ≥ 150° `U_TURN`, selain itu kiri/kanan |
+| 8 | Exit roundabout | tanpa maneuver (sudah tercakup tipe 7) |
+| 9 | U-turn | `U_TURN` |
+| 10 | Arrive | tanpa maneuver (setelah belokan terakhir layar menampilkan `STRAIGHT` dengan jarak ke tujuan) |
+| 11 | Depart | tanpa maneuver |
+| 12 | Keep left | `TURN_LEFT` |
+| 13 | Keep right | `TURN_RIGHT` |
+| lainnya | — | tanpa maneuver, dicatat sebagai `type N` |
+
+Tipe yang tidak punya padanan pas (bundaran dengan nomor keluar, tiba di
+tujuan, varian sedikit/tajam/ambil lajur) dicatat sebagai kebutuhan enum
+baru di bagian 13.8 dokumentasi proyek; enum firmware belum diubah.
+
+Untuk rute tanpa steps (digambar manual di geojson.io), maneuver diturunkan
+dari bentuk garis (`navgeo.py`): belokan kalau arah berubah ≥ 35° antara
+20 m sebelum dan 20 m sesudah satu titik, dan putar balik kalau lekukan di
+sekitarnya berjumlah ≥ 150° dalam ±40 m. Pengirim uji mencetak keduanya
+berdampingan. Pada rute uji di sekitar Monas, belokan di persimpangan cocok
+(selisih posisi < 15 m), tapi ORS menyebut putaran lewat jalan samping di
+486 m sebagai **"keep right"** sehingga layar menampilkan panah kanan,
+padahal garisnya berputar 180°. Bundaran HI (keluar ke-2, lurus) tidak
+menghasilkan maneuver dari kedua sumber.
+
+Jalan samping (`side_roads`) dikosongkan untuk ORS, karena ORS tidak
+menyediakan cabang persimpangan (bagian 3).
+
+### Test vector untuk app HP
+
+`tools/ble_sender/test_vectors/*.json` memuat input pipeline (rute lat/lon,
+maneuver, posisi GPS, nomor urut) dan hasilnya sampai pesan `'N'` serta
+frame BLE (write 20, 182, 514 byte) dalam hex. Kasusnya: belok kanan, belok
+kiri, putar balik, rute lurus, dekat ujung rute, dan tikungan yang
+disederhanakan ke ≤ 32 titik. Port TypeScript harus menghasilkan byte yang
+identik. Koordinatnya sintetis, dan berkasnya dijaga pytest supaya selalu
+cocok dengan `navgeo.py`/`navproto.py`. Rinciannya, termasuk aturan
+pembulatan yang harus ditiru, ada di `test_vectors/README.md`.
 
 ## 2. Garis Skematik (Schematic Line)
 

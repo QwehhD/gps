@@ -1,9 +1,10 @@
 # Butamap GPS — Dokumentasi Proyek & Persiapan Data Asli
 
-Status per 8 Oktober 2026: `main` (`9fb50aa`, fase 1 dan 2 jalur data asli:
-format biner `'N'`, fragmentasi BLE, penerima BLE, state "tidak ada sinyal",
-pengirim uji di laptop) ditambah kompas opsional (`ENABLE_COMPASS`) dan
-periode refresh 30 ms.
+Status per 17 Oktober 2026: fase 1 dan 2 jalur data asli (format biner
+`'N'`, fragmentasi BLE, penerima BLE, state "tidak ada sinyal", pengirim uji
+di laptop), kompas opsional (`ENABLE_COMPASS`), periode refresh 30 ms, dan
+uji `--latlon` di board dengan rute OpenRouteService (maneuver dari steps
+ORS, uji data basi, test vector untuk port app HP).
 
 Dokumen ini berdiri sendiri: ditulis supaya bisa dibaca tanpa membuka repo,
 sebagai bahan untuk merencanakan peralihan dari data simulasi ke data asli
@@ -45,9 +46,10 @@ lat/lon untuk app HP. Yang belum ada: app HP itu sendiri.
 | Mode loopback (simulator → encode → frame 20 B → rakit → decode → layar) | Selesai, diuji di board: 0 error, tampilan sama dengan SIM |
 | BLE server (Nordic UART Service, Bluedroid) | Jalan: frame navigasi + `GPS:lat,lon,speed` lama; diuji dari laptop di 514/182/20 B per write |
 | Pengisian `nav_data_t` dari data asli (`NAV_SOURCE_BLE`) | Selesai: task BLE → queue FreeRTOS panjang 1 → `loop()`; `ble_connected` diisi; paket hilang dihitung dari nomor urut |
-| State "tidak ada sinyal" (> 3 detik tanpa data valid / link putus) | Selesai: rute diredupkan, panel menampilkan ikon sinyal dicoret dan `--` |
-| Pengirim uji di laptop (`tools/ble_sender/`, Python + bleak) | Selesai: mode `--synthetic` dan `--latlon` (pipeline bagian 13.2), 28 test pytest |
-| App HP (routing, konversi koordinat, kirim BLE) | **Belum ada** — `tools/ble_sender/navgeo.py` adalah referensinya |
+| State "tidak ada sinyal" (> 3 detik tanpa data valid / link putus) | Selesai: rute diredupkan, panel menampilkan ikon sinyal dicoret dan `--`. Diuji di board dengan link tetap tersambung: masuk 3,08 s setelah pesan terakhir, pulih 0,05 s setelah data datang lagi, tanpa reconnect (bagian 13.5) |
+| Pengirim uji di laptop (`tools/ble_sender/`, Python + bleak) | Selesai: mode `--synthetic` dan `--latlon` (pipeline bagian 13.2), rute dari OpenRouteService (bagian 13.9), maneuver dari steps ORS atau bentuk garis, baris status per detik untuk mencocokkan layar; 152 test pytest |
+| Uji `--latlon` di board | Selesai 17 Okt 2026 dengan rute ORS di sekitar Monas: map-matching, jendela, heading-up, jarak, dan pergantian belokan cocok dengan layar (dicek mata) |
+| App HP (routing, konversi koordinat, kirim BLE) | **Belum ada** — `tools/ble_sender/navgeo.py` dan `maneuvers.py` adalah referensinya; test vector byte untuk port-nya di `tools/ble_sender/test_vectors/` |
 | Kompas QMC5883L | **Belum terpasang** (board hanya ESP32-S3 + layar). Kode opsional lewat `-DENABLE_COMPASS=1` (bawaan 0): probe sekali saat boot, tidak di-poll kalau tidak merespons. Hanya dipakai layar debug lama (bagian 13.6) |
 | IMU (MPU6050) | Belum ada di hardware |
 
@@ -56,7 +58,7 @@ lat/lon untuk app HP. Yang belum ada: app HP itu sendiri.
 | Komponen | Detail |
 | --- | --- |
 | Board | ESP32-S3 DevKitC-1, chip ESP32-S3 (QFN56) rev 0.2, flash 16 MB (quad), PSRAM 8 MB embedded |
-| USB | Port USB-Serial/JTAG bawaan, muncul sebagai `/dev/ttyACM*` |
+| USB | Dua port. Port USB-Serial/JTAG bawaan (`303a:1001`) **tidak berfungsi lagi sejak 17 Okt 2026**; board dipakai lewat port UART/COM (bridge CH343, `1a86:55d3`). Keduanya muncul sebagai `/dev/ttyACM*` dan bisa dipakai upload. Log aplikasi (`Serial`) keluar di port USB bawaan (`ARDUINO_USB_CDC_ON_BOOT=1`); untuk membacanya di port UART, build dengan `-UARDUINO_USB_CDC_ON_BOOT -DARDUINO_USB_CDC_ON_BOOT=0` (`tools/ble_sender/README.md`) |
 | Layar | GC9A01, bulat, 240×240, SPI |
 | Kompas | Belum terpasang. Kode mendukung QMC5883L di I2C alamat `0x0D` (opsional, `ENABLE_COMPASS`) |
 | LED | NeoPixel di GPIO 48 (dimatikan saat boot) |
@@ -480,6 +482,7 @@ sensor dan data BLE mentah.
 | 8 Okt 2026 | Fase 1 jalur data asli: format biner pesan `'N'` (encoder/decoder defensif), 31 unit test host, `NAV_SOURCE` menggantikan `USE_DUMMY_DATA`, mode loopback diuji di board (0 error, 40 fps, sama dengan SIM) |
 | 8 Okt 2026 | Fase 2 jalur data asli: fragmentasi BLE (frame `0xCE`, jalan di write 20 B), penerima BLE dengan queue FreeRTOS, state "tidak ada sinyal", pengirim uji Python (`--synthetic`, `--latlon`) diuji end-to-end lewat radio di 514/182/20 B per write; log performa kini mencatat frame terberat |
 | 8 Okt 2026 | Kompas jadi opsional (`ENABLE_COMPASS`, bawaan 0; board belum punya sensor); refresh 25 → 30 ms setelah pengukuran frame terberat; eksperimen buffer parsial ditolak |
+| 17 Okt 2026 | `--latlon` diuji di board dengan rute OpenRouteService: pengambil rute sekali-ambil (`fetch_route.py`), input GeoJSON dengan validasi lon/lat, ringkasan belokan, putar balik dikenali dari total lekukan, maneuver dari steps ORS (dipetakan ke 4 nilai enum) berdampingan dengan belokan garis, baris status per detik, uji data basi (3,08 s / 0,05 s), test vector byte untuk port app HP |
 
 ## 13. Persiapan data asli
 
@@ -531,7 +534,10 @@ chord ±3 satuan (±45 m) dan hasilnya halus.
 ### 13.3 Jalan samping dari data routing
 
 - **OpenRouteService**: per step hanya `bearing_before`/`bearing_after`
-  jalur rider sendiri; tidak ada cabang lain.
+  jalur rider sendiri; tidak ada cabang lain. Steps-nya cukup untuk
+  maneuver (tipe instruksi + `way_points`, dipetakan ke 4 nilai enum,
+  `docs/navigation-protocol.md` bagian 1), jadi dengan ORS jalan samping
+  dikosongkan.
 - **Mapbox Directions**: `steps[].intersections[]` berisi `location`,
   `bearings[]`, `entry[]`, `in`, `out` — semua jalan yang bertemu di
   persimpangan. Setiap bearing selain `in`/`out` bisa dijadikan jalan
@@ -666,7 +672,11 @@ Fase 2 (selesai):
 3. Data basi: > 3 detik tanpa pesan valid (`NAV_RX_STALE_MS`) atau link
    putus → `ui_update_nav_signal(false)` (bagian 8). Saat link putus queue
    dikosongkan dan perakit ulang direset. `ble_connected` diisi. Paket
-   hilang dihitung dari nomor urut dan dicatat ke serial.
+   hilang dihitung dari nomor urut dan dicatat ke serial. Diuji 17 Okt 2026
+   (kirim 10 s, jeda 10 s dengan link tetap tersambung, kirim lagi): serial
+   mencatat `nav: no signal (no valid message for 3 s)` 3,08 s setelah pesan
+   terakhir dan `nav: signal back` 0,05 s setelah pengiriman berlanjut,
+   tanpa reconnect (`docs/navigation-protocol.md` bagian 1).
 4. Pengirim uji di laptop (`tools/ble_sender/`, Python + bleak), termasuk
    implementasi referensi konversi koordinat bagian 13.2 (`navgeo.py`,
    dengan test arah: menghadap timur, titik di utara → x < 0).
@@ -725,8 +735,21 @@ jauh di bawah kapasitas BLE.
   `intersections`).
 - Skala meter per satuan: tetap (mis. 15 m) atau zoom mengikuti kecepatan.
 - Sumber heading untuk konversi: arah rute, course GPS, atau kompas HP.
-- Jenis maneuver tambahan: belok sedikit, bundaran, tiba di tujuan, keluar
-  jalan tol — perlu ikon dan nilai enum baru.
+- **Jenis maneuver tambahan** (perlu ikon dan nilai enum baru; enum firmware
+  belum diubah). Kebutuhan dari pemetaan instruksi ORS
+  (`docs/navigation-protocol.md` bagian 1, "Maneuver dari routing"):
+
+  | Instruksi ORS | Sekarang ditampilkan | Usulan |
+  | --- | --- | --- |
+  | Enter/exit roundabout (7/8, dengan `exit_number`) | Belokan jalan keluarnya, atau tanpa maneuver kalau lurus; rider tidak tahu ada bundaran | `ROUNDABOUT` + nomor keluar (butuh 1 byte tambahan di pesan) |
+  | Arrive (10) | `STRAIGHT` dengan jarak ke tujuan | `ARRIVE` (ikon bendera/tujuan) |
+  | Keep left/right (12/13) | Panah belok kiri/kanan penuh. Di rute uji Monas, "keep right" ternyata putaran 180° lewat jalan samping | `KEEP_LEFT`/`KEEP_RIGHT` (panah serong); perlu juga diputuskan apakah app memeriksa geometri di belakang step seperti ini |
+  | Slight / sharp left/right (2–5) | Kiri/kanan biasa | `SLIGHT_*`/`SHARP_*` kalau ikonnya mau dibedakan |
+  | Keluar jalan tol | ORS tidak punya tipe sendiri (biasanya keep/slight) | Ikut keputusan keep/slight |
+
+  Depart (11) dan straight (6) tidak butuh enum. Nilai baru berarti decoder
+  lama menolak pesannya (`NAV_DECODE_ERR_MANEUVER` untuk nilai ≥ 4), jadi
+  firmware dan app harus diperbarui bersamaan.
 - Sinyal GPS hilang di sisi HP (link BLE masih tersambung): HP sebaiknya
   berhenti mengirim (ESP32 masuk "tidak ada sinyal" setelah 3 detik) atau
   diberi flag tersendiri. Tampilan untuk link putus / data basi sudah ada.
@@ -747,6 +770,32 @@ jauh di bawah kapasitas BLE.
   ruang di panel dan biaya render (bagian 9).
 - Nasib pesan lama `GPS:` dan `ROUTE:`.
 
+### 13.9 Rute uji dari OpenRouteService
+
+Rute untuk menguji `--latlon` diambil **sekali** dari ORS Directions V2
+(profile `driving-car`, format GeoJSON) lalu disimpan ke berkas, supaya uji
+bisa diulang tanpa internet dan tanpa kuota. Rinciannya di
+`tools/ble_sender/README.md`.
+
+1. Taruh API key ORS di `tools/ble_sender/.env` sebagai satu baris
+   `ORS_API_KEY=<key>`, atau di environment variable `ORS_API_KEY`. `.env`
+   masuk `.gitignore` dan key tidak pernah dicetak.
+2. Ambil rute, dengan titik ditulis **`lat,lon`** seperti saat klik kanan di
+   Google Maps (script yang membaliknya ke `lon,lat` untuk ORS):
+
+   ```bash
+   .venv/bin/python fetch_route.py --from "-7.9666,112.6326" --to "-7.9826,112.6308" --name kampus
+   ```
+
+   Hasilnya `routes/kampus.geojson`, respons ORS apa adanya.
+   `routes/*.geojson` masuk `.gitignore` karena berisi lokasi pribadi.
+3. Jalankan `ble_sender.py --latlon routes/kampus.geojson`. Maneuver diambil
+   dari steps ORS, dan belokan dari bentuk garis dicetak berdampingan
+   beserta selisihnya.
+
+Berkas yang digambar manual di geojson.io (tanpa steps) juga bisa dipakai;
+maneuvernya lalu diturunkan dari bentuk garis.
+
 ## 14. Batasan dan masalah yang diketahui
 
 - Ada satu jeda ±55 ms sekali, ±9 detik setelah boot (kemungkinan pemuatan
@@ -757,6 +806,10 @@ jauh di bawah kapasitas BLE.
   penyebabnya belum diselidiki.
 - Kompas belum terpasang; layar debug lama menampilkan heading dan X/Y/Z 0
   (bagian 13.6).
+- Port USB native board tidak berfungsi lagi sejak 17 Okt 2026. Board
+  dipakai lewat port UART/COM; log aplikasi di sana butuh build
+  `-DARDUINO_USB_CDC_ON_BOOT=0` (bagian 3). Bawaan di `platformio.ini`
+  belum diubah.
 - Pesan serial dari task BLE dan `loop()` kadang tercampur/terpotong
   (mis. `✓ BLE Client c`), karena keduanya mencetak ke USB-CDC bersamaan.
 - Sisa peringatan kompilasi: `lv_obj_remove_flag` di
