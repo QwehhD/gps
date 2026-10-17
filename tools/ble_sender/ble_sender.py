@@ -8,7 +8,11 @@ without response.
 
     python ble_sender.py --synthetic
     python ble_sender.py --latlon                 # built-in route around Monas
-    python ble_sender.py --latlon my_route.json --noise 5 --chunk-size 20
+    python ble_sender.py --latlon routes/kampus.geojson --noise 5 --chunk-size 20
+
+--latlon reads GeoJSON (a LineString, bare or in a Feature or
+FeatureCollection, as fetch_route.py saves it or geojson.io draws it) or
+{"points": [[lat, lon], ...]}, and prints the route's turns before riding.
 
 While it runs: Enter pauses/resumes sending (the link stays up, so the
 display's "no signal" state can be tested), q + Enter quits.
@@ -23,7 +27,7 @@ import sys
 import time
 import warnings
 
-from navproto import MIN_FRAME, MSG_MAX_SIZE, encode, frame_count, smallest_frame_size, split_frames
+from navproto import MIN_FRAME, MSG_MAX_SIZE, Maneuver, encode, frame_count, smallest_frame_size, split_frames
 
 DEVICE_NAME = "GPS_Tracker_BLE"
 RX_CHAR_UUID = "6e400002-b5a3-f393-e0a9-e50e24dcca9e"
@@ -36,9 +40,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument("--synthetic", action="store_true",
                       help="random route in local coordinates, like the firmware simulator")
-    mode.add_argument("--latlon", nargs="?", const="", metavar="ROUTE_JSON",
-                      help="ride a lat/lon route through the phone-side pipeline "
-                           "(built-in sample route if no file is given)")
+    mode.add_argument("--latlon", nargs="?", const="", metavar="ROUTE_FILE",
+                      help="ride a lat/lon route (GeoJSON or points JSON) through the phone-side "
+                           "pipeline (built-in sample route if no file is given)")
     p.add_argument("--name", default=DEVICE_NAME, help="BLE name to scan for (default %(default)s)")
     p.add_argument("--address", help="connect to this address instead of scanning by name")
     p.add_argument("--rate", type=float, default=5.0, help="messages per second (default %(default)s)")
@@ -87,6 +91,27 @@ def check_chunk_size(chunk_size: int, max_write: int | None) -> None:
                  f"{smallest_frame_size()} (BLE guarantees {MIN_FRAME})")
 
 
+def route_summary(route, source: str) -> str:
+    """What --latlon prints before riding: the turns the route geometry
+    gives, to check against what the display shows."""
+    from navgeo import TURN_CHORD_M, TURN_MIN_DEG
+
+    lines = [f"route: {source}", f"  {len(route.latlon)} points, {route.length:.0f} m"]
+    if not route.turns:
+        lines.append(f"  no turns sharper than {TURN_MIN_DEG:g}°")
+        return "\n".join(lines)
+    direction = {Maneuver.TURN_LEFT: "left", Maneuver.TURN_RIGHT: "right", Maneuver.U_TURN: "u-turn"}
+    count = len(route.turns)
+    lines.append(f"  {count} turn{'s' if count > 1 else ''} (direction change over "
+                 f"{TURN_CHORD_M:g} m either side, sharper than {TURN_MIN_DEG:g}°):")
+    lines.append("      #  direction  angle  from start  lat,lon")
+    for n, turn in enumerate(route.turns, 1):
+        lat, lon = route.latlon_at(turn.s)
+        lines.append(f"  {n:5d}  {direction[turn.maneuver]:<9}  {abs(turn.angle_deg):4.0f}°  "
+                     f"{turn.s:8.0f} m  {lat:.6f},{lon:.6f}")
+    return "\n".join(lines)
+
+
 def make_source(args: argparse.Namespace, rng: random.Random):
     """Returns step(dt) -> NavData."""
     if args.synthetic:
@@ -94,12 +119,18 @@ def make_source(args: argparse.Namespace, rng: random.Random):
 
         return SyntheticRide(rng).step
 
-    from gps_sim import SAMPLE_ROUTE, FakeGps, load_route
+    from gps_sim import SAMPLE_ROUTE, FakeGps, read_route_file
     from navgeo import Navigator, Route
 
-    route = Route(load_route(args.latlon) if args.latlon else SAMPLE_ROUTE)
-    print(f"route: {len(route.latlon)} points, {route.length:.0f} m, "
-          f"turns: {', '.join(f'{t.maneuver.name} at {t.s:.0f} m' for t in route.turns) or 'none'}")
+    if args.latlon:
+        try:
+            points, kind = read_route_file(args.latlon)
+        except (OSError, ValueError) as e:
+            sys.exit(f"error: {e}")
+        route, source = Route(points), f"{args.latlon} ({kind})"
+    else:
+        route, source = Route(SAMPLE_ROUTE), "built-in sample route around Monas"
+    print(route_summary(route, source), flush=True)
     gps = FakeGps(route, args.speed, args.noise, rng)
     navigator = Navigator(route)
 
