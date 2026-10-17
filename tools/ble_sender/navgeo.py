@@ -133,6 +133,7 @@ def simplify(points: list[Point], max_points: int, keep_index: int | None = None
 class Turn:
     s: float  # route distance of the turn, metres
     maneuver: Maneuver
+    angle_deg: float  # change of direction across the turn, + = right (clockwise)
 
 
 class Route:
@@ -225,7 +226,7 @@ class Route:
                 maneuver = Maneuver.TURN_LEFT
             else:
                 maneuver = Maneuver.TURN_RIGHT
-            out.append(Turn(s, maneuver))
+            out.append(Turn(s, maneuver, delta))
         return out
 
     def window(self, s0: float) -> tuple[list[LatLon], int]:

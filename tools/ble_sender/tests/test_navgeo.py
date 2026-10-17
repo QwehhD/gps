@@ -142,6 +142,17 @@ def test_sample_route_turns():
     assert 4000 < route.length < 6000
 
 
+def test_turn_angle_is_signed_right_positive():
+    # East, left (north), right (east) again, then back west 3 m further south: a U-turn.
+    route = Route([offset(0, 0), offset(500, 0), offset(500, 300), offset(900, 300), offset(900, 297),
+                   offset(400, 297)])
+    assert [t.maneuver for t in route.turns] == [Maneuver.TURN_LEFT, Maneuver.TURN_RIGHT, Maneuver.U_TURN]
+    left, right, uturn = (t.angle_deg for t in route.turns)
+    assert left == pytest.approx(-90.0, abs=0.5)
+    assert right == pytest.approx(90.0, abs=0.5)
+    assert abs(uturn) >= 150.0
+
+
 def test_riding_the_sample_route_with_noise():
     route = Route(SAMPLE_ROUTE)
     gps = FakeGps(route, speed_kmh=40, noise_m=5, rng=random.Random(2))
