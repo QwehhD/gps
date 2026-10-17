@@ -19,11 +19,12 @@ This is the reference implementation for the phone app. Each update:
    (ahead), h clockwise from north.
 7. Divide by 15 m per unit.
 
-The next maneuver comes from the route's own geometry (turns sharper than
-35 degrees). A turn whose curve adds up to 150 degrees or more within 40 m
-either side is a U-turn, so a loop through a side road or a turn across a
-wide median counts as one. A real app should take maneuvers from its
-routing API instead.
+The maneuvers come from the routing API's steps (maneuvers.py maps those of
+OpenRouteService), which is what the phone app should use. Routes without
+steps fall back on the route's own geometry: turns sharper than 35 degrees,
+and a turn whose curve adds up to 150 degrees or more within 40 m either
+side is a U-turn, so a loop through a side road or a turn across a wide
+median counts as one.
 """
 
 from __future__ import annotations
@@ -206,13 +207,19 @@ class Route:
         best = best_near if best_near[0] <= MATCH_MAX_OFFSET_M else best_all
         return best[1], best[0]
 
+    def direction_change(self, s: float, chord_m: float = TURN_CHORD_M) -> float:
+        """How much the route turns at s, degrees, + = right: from its
+        direction over chord_m before s to its direction over chord_m after."""
+        here = self.xy_at(s)
+        before = bearing_deg(*_sub(here, self.xy_at(s - chord_m)))
+        after = bearing_deg(*_sub(self.xy_at(s + chord_m), here))
+        return (after - before + 180.0) % 360.0 - 180.0
+
     def _detect_turns(self) -> list[Turn]:
         candidates: list[tuple[float, float]] = []
         for i in range(1, len(self.xy) - 1):
             s = self.cum[i]
-            before = bearing_deg(*_sub(self.xy[i], self.xy_at(s - TURN_CHORD_M)))
-            after = bearing_deg(*_sub(self.xy_at(s + TURN_CHORD_M), self.xy[i]))
-            delta = (after - before + 180.0) % 360.0 - 180.0
+            delta = self.direction_change(s)
             if abs(delta) >= TURN_MIN_DEG:
                 candidates.append((s, delta))
         # Several vertices of one curve: keep the sharpest.
@@ -273,10 +280,13 @@ def _sub(a: Point, b: Point) -> Point:
 
 
 class Navigator:
-    """Keeps the map-matching state for one ride along a route."""
+    """Keeps the map-matching state for one ride along a route. The
+    maneuvers come from turns (e.g. the routing API's steps), or from the
+    route's own geometry when turns is None."""
 
-    def __init__(self, route: Route):
+    def __init__(self, route: Route, turns: list[Turn] | None = None):
         self.route = route
+        self.turns = route.turns if turns is None else sorted(turns, key=lambda t: t.s)
         self.s: float | None = None
 
     def update(self, lat: float, lon: float, speed_kmh: float) -> NavData:
@@ -295,7 +305,7 @@ class Navigator:
             x, y = rotate_heading_up(east, north, heading)
             window.append((x / M_PER_UNIT, y / M_PER_UNIT))
 
-        ahead = [t for t in route.turns if t.s > s0]
+        ahead = [t for t in self.turns if t.s > s0]
         if ahead:
             maneuver, distance = ahead[0].maneuver, ahead[0].s - s0
         else:
